@@ -1,5 +1,4 @@
 import { contextBridge, ipcRenderer } from 'electron';
-import { IPC_CHANNELS } from '../shared/types/ipc';
 import type { AppApi } from '../shared/types/ipc';
 
 /**
@@ -9,7 +8,60 @@ import type { AppApi } from '../shared/types/ipc';
  * everything it can do is explicitly whitelisted here as `window.app.*`,
  * matching the `AppApi` contract in src/shared/types/ipc.ts one-to-one.
  * No channel name is ever constructed dynamically from renderer input.
+ *
+ * IPC_CHANNELS is duplicated here (rather than imported from
+ * ../shared/types/ipc) deliberately: Electron's sandboxed preload
+ * environment (`sandbox: true`) cannot resolve `require()` of sibling
+ * relative files — only a preload that is fully self-contained (plus
+ * `require('electron')`, which is specially shimmed) loads correctly.
+ * Importing a value from a relative path here compiles to a `require()`
+ * that silently fails in the sandboxed preload context, `window.app`
+ * never gets exposed, and the renderer crashes on its first read of it —
+ * which is exactly the blank/black-screen bug this fixed. The type-only
+ * `import type { AppApi }` below is erased at compile time and has no
+ * runtime require, so it stays safe to import normally. Keep this object
+ * in sync with IPC_CHANNELS in ../shared/types/ipc.ts if channels change.
  */
+const IPC_CHANNELS = {
+  browserGetAll: 'browser:getAll',
+  browserNavigate: 'browser:navigate',
+  browserReload: 'browser:reload',
+  browserStop: 'browser:stop',
+  browserBack: 'browser:back',
+  browserForward: 'browser:forward',
+  browserReloadAll: 'browser:reloadAll',
+  browserStopAll: 'browser:stopAll',
+  browserClearCookies: 'browser:clearCookies',
+  browserClearCache: 'browser:clearCache',
+  browserDevTools: 'browser:devTools',
+  browserSetBounds: 'browser:setBounds',
+  browserSetActive: 'browser:setActive',
+  browserCheckIp: 'browser:checkIp',
+  browserCheckAllIps: 'browser:checkAllIps',
+  browserRestart: 'browser:restart',
+  browserStateChanged: 'browser:stateChanged',
+
+  proxyReload: 'proxy:reload',
+  proxyGetAll: 'proxy:getAll',
+  proxyAssign: 'proxy:assign',
+  proxyReplaceFailed: 'proxy:replaceFailed',
+  proxyValidate: 'proxy:validate',
+  proxyValidateAll: 'proxy:validateAll',
+  proxyImportText: 'proxy:importText',
+  proxyImportFile: 'proxy:importFile',
+  proxyExport: 'proxy:export',
+  proxyProviderHealth: 'proxy:providerHealth',
+  proxyAssignmentsChanged: 'proxy:assignmentsChanged',
+
+  settingsGet: 'settings:get',
+  settingsUpdate: 'settings:update',
+  settingsReset: 'settings:reset',
+
+  systemDiagnostics: 'system:diagnostics',
+  systemOpenLogs: 'system:openLogs',
+  systemPickProxyFile: 'system:pickProxyFile',
+  systemClipboard: 'system:clipboard'
+} as const;
 const api: AppApi = {
   browser: {
     getAll: () => ipcRenderer.invoke(IPC_CHANNELS.browserGetAll),
