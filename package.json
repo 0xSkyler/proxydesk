@@ -23,8 +23,8 @@
     "typecheck": "tsc -p tsconfig.main.json --noEmit && tsc -p tsconfig.renderer.json --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "package": "npm run build && electron-builder --config electron-builder.yml",
-    "package:win": "npm run build && electron-builder --config electron-builder.yml --win nsis"
+    "package": "npm run build && electron-builder --config electron-builder.yml --publish never",
+    "package:win": "npm run build && electron-builder --config electron-builder.yml --win nsis --publish never"
   },
   "dependencies": {
     "https-proxy-agent": "^7.0.5",

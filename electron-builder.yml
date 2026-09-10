@@ -19,6 +19,16 @@ extraMetadata:
 
 asar: true
 
+# electron-builder auto-detects a GitHub "publish" target from package.json's
+# `repository` field and, in CI, tries to look up a matching draft release —
+# which requires a GH_TOKEN even when nothing is actually being published.
+# This project publishes releases via its own separate GitHub Actions step
+# (softprops/action-gh-release, gated on version tags), so electron-builder
+# itself should never attempt to touch GitHub. `publish: never` as a config
+# value (rather than the `--publish never` CLI flag) makes electron-builder
+# try to load a "never" publish provider module that doesn't exist, so this
+# is disabled via the CLI flag in package.json's package/package:win scripts
+# instead — see the note there.
 win:
   target:
     - target: nsis
