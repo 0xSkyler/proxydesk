@@ -1,0 +1,155 @@
+/* Grid + browser panel layout. Imported from global.css indirectly via
+   App structure; kept separate for clarity since this is the layout most
+   likely to need tuning per display resolution. */
+
+.proxy-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 10px 16px;
+  background: var(--bg-elevated);
+  border-bottom: 1px solid var(--border);
+  flex-wrap: wrap;
+}
+
+.proxy-toolbar__group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.proxy-toolbar__nav {
+  margin-left: auto;
+  display: flex;
+  gap: 4px;
+}
+
+.proxy-toolbar__nav button.active {
+  background: var(--accent);
+  color: var(--accent-contrast);
+  border-color: var(--accent);
+}
+
+.browser-grid {
+  display: grid;
+  gap: 10px;
+  padding: 10px;
+  height: 100%;
+  min-height: 600px;
+  grid-auto-rows: minmax(280px, 1fr);
+}
+
+.browser-panel {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--bg-panel);
+  min-height: 0;
+}
+
+.browser-panel__header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  background: var(--bg-elevated);
+  font-size: 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.browser-panel__title {
+  font-weight: 600;
+}
+
+.browser-panel__status-text {
+  margin-left: auto;
+  color: var(--text-muted);
+}
+
+.browser-panel__toolbar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 6px;
+  border-bottom: 1px solid var(--border);
+  position: relative;
+}
+
+.browser-panel__toolbar button {
+  padding: 4px 8px;
+}
+
+.browser-panel__address {
+  flex: 1;
+}
+
+.browser-panel__address input {
+  width: 100%;
+}
+
+.browser-panel__menu {
+  position: relative;
+}
+
+.browser-panel__menu-list {
+  position: absolute;
+  right: 0;
+  top: 100%;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  display: flex;
+  flex-direction: column;
+  min-width: 160px;
+  z-index: 10;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+}
+
+.browser-panel__menu-list button {
+  border: none;
+  border-radius: 0;
+  text-align: left;
+}
+
+.browser-panel__viewport {
+  flex: 1;
+  min-height: 0;
+  background: var(--bg);
+  position: relative;
+}
+
+.browser-panel__overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  background: rgba(0, 0, 0, 0.6);
+  color: #fff;
+}
+
+.browser-panel__footer {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 6px 10px;
+  font-size: 11px;
+  color: var(--text-muted);
+  border-top: 1px solid var(--border);
+  flex-wrap: wrap;
+}
+
+.browser-panel__footer button {
+  margin-left: auto;
+  padding: 3px 8px;
+}
+
+@media (max-width: 900px) {
+  .browser-grid {
+    grid-template-columns: 1fr !important;
+  }
+}

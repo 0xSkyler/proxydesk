@@ -1,0 +1,54 @@
+{
+  "name": "proxydesk",
+  "productName": "ProxyDesk",
+  "version": "0.1.0",
+  "description": "Multi-browser proxy workspace desktop application — 10 independent, proxy-isolated Chromium sessions in one window.",
+  "author": "ProxyDesk",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/your-org/proxydesk.git"
+  },
+  "main": "dist/main/main.js",
+  "private": true,
+  "scripts": {
+    "dev": "concurrently -k -n VITE,ELECTRON -c blue,green \"npm:dev:renderer\" \"npm:dev:electron\"",
+    "dev:renderer": "vite",
+    "dev:electron": "node scripts/wait-and-launch.js",
+    "build": "npm run build:renderer && npm run build:main",
+    "build:renderer": "vite build",
+    "build:main": "tsc -p tsconfig.main.json",
+    "start": "npm run build && electron .",
+    "lint": "eslint \"src/**/*.{ts,tsx}\" \"tests/**/*.ts\"",
+    "typecheck": "tsc -p tsconfig.main.json --noEmit && tsc -p tsconfig.renderer.json --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "package": "npm run build && electron-builder --config electron-builder.yml",
+    "package:win": "npm run build && electron-builder --config electron-builder.yml --win nsis"
+  },
+  "dependencies": {
+    "https-proxy-agent": "^7.0.5",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "socks-proxy-agent": "^8.0.4",
+    "zustand": "^4.5.4"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.9",
+    "@types/react": "^18.3.3",
+    "@types/react-dom": "^18.3.0",
+    "@typescript-eslint/eslint-plugin": "^7.16.1",
+    "@typescript-eslint/parser": "^7.16.1",
+    "@vitejs/plugin-react": "^4.3.1",
+    "concurrently": "^8.2.2",
+    "electron": "^31.2.1",
+    "electron-builder": "^24.13.3",
+    "eslint": "^8.57.0",
+    "eslint-plugin-react": "^7.34.4",
+    "eslint-plugin-react-hooks": "^4.6.2",
+    "typescript": "^5.5.3",
+    "vite": "^5.3.4",
+    "vitest": "^2.0.3",
+    "wait-on": "^7.2.0"
+  }
+}

@@ -1,0 +1,49 @@
+# electron-builder configuration
+# App identity is intentionally centralized here so the product can be
+# rebranded (name, appId, icons) without touching source code.
+appId: com.proxydesk.desktop
+productName: ProxyDesk
+copyright: Copyright (c) 2026 ProxyDesk
+
+directories:
+  output: release
+  buildResources: build
+
+files:
+  - dist/**/*
+  - package.json
+  - "!**/*.map"
+
+extraMetadata:
+  main: dist/main/main.js
+
+asar: true
+
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+  icon: build/icons/icon.ico
+  artifactName: MultiBrowserProxySetup.${ext}
+
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: ProxyDesk
+  artifactName: MultiBrowserProxySetup.${ext}
+
+# Linux/mac targets are not required by this project (Windows-only deliverable)
+# but are left buildable for local development on other platforms.
+linux:
+  target:
+    - AppImage
+  icon: build/icons
+
+mac:
+  target:
+    - dmg
+  icon: build/icons/icon.icns
