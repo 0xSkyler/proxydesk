@@ -83,4 +83,9 @@ export interface ReloadProxiesSummary {
   working: number;
   assignments: ProxyAssignment[];
   providerErrors: Array<{ provider: string; reason: string }>;
+  /** How many public/aggregated-list candidates were excluded by
+   * maxCandidatesPerReload before validation even ran (a random sample,
+   * not a fixed cutoff — see ProxyManager.reload). 0 when nothing was
+   * skipped, e.g. validation is off or candidates fit within the cap. */
+  candidatesSkipped: number;
 }

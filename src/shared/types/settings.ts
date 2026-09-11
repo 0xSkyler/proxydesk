@@ -29,6 +29,16 @@ export interface ProxySettings {
    * untrusted sources, and gated behind the same warning acknowledgment. */
   aggregatedListsEnabled: boolean;
   maxConcurrentChecks: number;
+  /** Hard cap on how many discovered proxies get validated in one reload.
+   * Imported proxies and your own custom/API providers are never subject
+   * to this cap — only public/aggregated-list results are, and a random
+   * sample of them is taken so it isn't always the same subset. Without a
+   * cap, enabling "Aggregated lists" (which can surface several thousand
+   * proxies across ~70 sources) would queue all of them for validation at
+   * maxConcurrentChecks concurrency — e.g. 5,000 candidates at 10
+   * concurrent / 8s timeout each is ~66 minutes, which is what "reload
+   * never finishes" usually means. */
+  maxCandidatesPerReload: number;
 }
 
 export interface CustomProviderConfig {
@@ -86,7 +96,8 @@ export const DEFAULT_SETTINGS: AppSettings = {
     ipCheckUrl: 'https://api.ipify.org?format=json',
     publicProvidersEnabled: false,
     aggregatedListsEnabled: false,
-    maxConcurrentChecks: 10
+    maxConcurrentChecks: 15,
+    maxCandidatesPerReload: 400
   },
   customProviders: [],
   performance: {

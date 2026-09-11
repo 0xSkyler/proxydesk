@@ -44,7 +44,12 @@ export function ProxyToolbar(): JSX.Element {
       } else {
         pushToast(
           `Proxy reload complete — found ${summary.found}, working ${summary.working}, ` +
-            `${summary.assignments.filter((a) => a.proxy).length}/${summary.assignments.length} browsers assigned.`,
+            `${summary.assignments.filter((a) => a.proxy).length}/${summary.assignments.length} browsers assigned.` +
+            (summary.candidatesSkipped > 0
+              ? ` (${summary.candidatesSkipped} public/aggregated proxies skipped this run — capped at ` +
+                `${settings.proxy.maxCandidatesPerReload} candidates per reload in Settings; imported and custom-provider ` +
+                `proxies are never capped.)`
+              : ''),
           'success'
         );
       }

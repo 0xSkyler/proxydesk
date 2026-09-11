@@ -151,6 +151,27 @@ export class ProxyManager extends EventEmitter {
     const countryMatched = filterByCountry(merged, countryCode).length;
     let candidates = filterByCountry(merged, countryCode);
 
+    // Cap how many candidates go into validation. Imported proxies and
+    // your own custom/API providers are exempt — only public/aggregated
+    // results are capped, since those are the ones that can arrive in the
+    // thousands (the aggregated-lists provider alone spans ~70 sources)
+    // and would otherwise queue validation for tens of minutes at
+    // maxConcurrentChecks concurrency. A random sample is taken each
+    // reload rather than always the first N, so which proxies actually
+    // get checked varies run to run instead of favoring whichever source
+    // happened to list itself first.
+    let candidatesSkipped = 0;
+    const trustedSourceNames = new Set(['Imported', ...settings.customProviders.map((p) => p.name)]);
+    const isTrusted = (p: ProxyRecord) => p.sources.some((s) => trustedSourceNames.has(s));
+    const trusted = candidates.filter(isTrusted);
+    const bulk = candidates.filter((c) => !isTrusted(c));
+    const bulkBudget = Math.max(0, settings.proxy.maxCandidatesPerReload - trusted.length);
+    if (bulk.length > bulkBudget) {
+      const sampled = shuffle(bulk).slice(0, bulkBudget);
+      candidatesSkipped = bulk.length - sampled.length;
+      candidates = [...trusted, ...sampled];
+    }
+
     if (settings.proxy.validationEnabled && candidates.length > 0) {
       const results = await ProxyValidator.validateMany(candidates, {
         timeoutMs: settings.proxy.validationTimeoutMs,
@@ -190,7 +211,14 @@ export class ProxyManager extends EventEmitter {
 
     await this.persist();
 
-    const summary: ReloadProxiesSummary = { found, countryMatched, working, assignments, providerErrors };
+    const summary: ReloadProxiesSummary = {
+      found,
+      countryMatched,
+      working,
+      assignments,
+      providerErrors,
+      candidatesSkipped
+    };
     this.emit('assignmentsChanged', summary);
     return summary;
   }
@@ -344,4 +372,15 @@ export class ProxyManager extends EventEmitter {
 function stripSecretsForList(proxy: ProxyRecord): ProxyRecord {
   if (!proxy.password) return proxy;
   return { ...proxy, password: '••••••••' };
+}
+
+/** Fisher-Yates shuffle, used to take a fair random sample of candidates
+ * when maxCandidatesPerReload trims the bulk (public/aggregated) pool. */
+function shuffle<T>(items: T[]): T[] {
+  const copy = [...items];
+  for (let i = copy.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [copy[i], copy[j]] = [copy[j], copy[i]];
+  }
+  return copy;
 }

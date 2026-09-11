@@ -30,6 +30,7 @@ export class ScraperCheckerProvider implements ProxyProvider {
 
   private static readonly FETCH_TIMEOUT_MS = 10000;
   private static readonly MAX_CONCURRENT_FETCHES = 12;
+  private static readonly MAX_PER_SOURCE = 150;
 
   private static readonly SOURCES: ReadonlyArray<{ url: string; protocol: ProxyProtocol }> = [
     // --- HTTP / HTTPS ---
@@ -206,7 +207,13 @@ export class ScraperCheckerProvider implements ProxyProvider {
         const text = await this.fetchOne(entry.url, options.signal);
         if (text) {
           successCount++;
-          results.push(...extractProxies(text, entry.protocol, this.name));
+          // Cap per-source: some of these lists run to several thousand
+          // lines, and taking all of them from every one of the ~70
+          // sources can add up to a candidate pool ProxyManager would
+          // then have to validate one by one — this keeps any single
+          // source from dominating that pool (ProxyManager's own
+          // maxCandidatesPerReload cap handles the overall total).
+          results.push(...extractProxies(text, entry.protocol, this.name).slice(0, ScraperCheckerProvider.MAX_PER_SOURCE));
         }
         entry = queue.shift();
       }

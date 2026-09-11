@@ -172,6 +172,23 @@ export function Settings(): JSX.Element {
           />
         </label>
         <label>
+          Max candidates validated per reload
+          <input
+            type="number"
+            min={0}
+            max={5000}
+            value={settings.proxy.maxCandidatesPerReload}
+            onChange={(e) =>
+              void apply({ proxy: { ...settings.proxy, maxCandidatesPerReload: Number(e.target.value) } })
+            }
+          />
+        </label>
+        <p className="muted" style={{ marginTop: -6, marginBottom: 0 }}>
+          Caps how many public/aggregated-list proxies get checked per reload (a random sample, not always the same
+          ones) so a large source list doesn&rsquo;t turn one reload into a multi-hour validation queue. Imported and
+          custom-provider proxies are never capped.
+        </p>
+        <label>
           IP check URL
           <input
             value={settings.proxy.ipCheckUrl}
