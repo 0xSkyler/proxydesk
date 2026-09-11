@@ -24,11 +24,26 @@ export function ProxyToolbar(): JSX.Element {
     try {
       const summary = await window.app.proxy.reload(selectedCountry);
       setReloadSummary(summary);
-      pushToast(
-        `Proxy reload complete — found ${summary.found}, working ${summary.working}, ` +
-          `${summary.assignments.filter((a) => a.proxy).length}/${summary.assignments.length} browsers assigned.`,
-        'success'
-      );
+
+      if (summary.found === 0) {
+        // Zero proxies found is expected, not an error, when there's no
+        // source configured yet — public providers are off by default (see
+        // the security warning) and nothing has been imported. Say that
+        // plainly instead of a generic "0 found" that reads like a failure.
+        const noPublic = !settings.proxy.publicProvidersEnabled;
+        pushToast(
+          noPublic
+            ? 'No proxies found — public proxies are off (toggle "Public proxies" above, or use Import Proxies to add your own).'
+            : 'No proxies found from any enabled provider. Try a different country, or use Import Proxies to add your own.',
+          'info'
+        );
+      } else {
+        pushToast(
+          `Proxy reload complete — found ${summary.found}, working ${summary.working}, ` +
+            `${summary.assignments.filter((a) => a.proxy).length}/${summary.assignments.length} browsers assigned.`,
+          'success'
+        );
+      }
       for (const err of summary.providerErrors) {
         pushToast(`Provider "${err.provider}" failed: ${err.reason}`, 'error');
       }

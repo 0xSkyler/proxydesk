@@ -34,9 +34,20 @@
   display: grid;
   gap: 10px;
   padding: 10px;
+  /* Fixed to the viewport height, not a minimum — the whole point of the
+     grid is that all 10 browsers are visible at once with no scrolling.
+     A forced min-height (280px/row) used to make 5 rows taller than most
+     windows, which made this container scroll — and because the real
+     Chromium content is a native BrowserView positioned by absolute pixel
+     coordinates (see BrowserPanel's ResizeObserver reporting bounds to the
+     main process), it only re-measures on resize, not on scroll: scrolling
+     this box left each BrowserView visually "stuck" while the DOM around
+     it moved. Box-sizing so gap/padding don't push the grid past 100%. */
+  box-sizing: border-box;
   height: 100%;
-  min-height: 600px;
-  grid-auto-rows: minmax(280px, 1fr);
+  width: 100%;
+  grid-auto-rows: 1fr;
+  overflow: hidden;
 }
 
 .browser-panel {
