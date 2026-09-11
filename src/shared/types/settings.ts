@@ -24,6 +24,10 @@ export interface ProxySettings {
   rotationInterval: ProxyRotationInterval;
   ipCheckUrl: string;
   publicProvidersEnabled: boolean;
+  /** The monosans/proxy-scraper-checker-style aggregated public list source
+   * (~70 GitHub/API lists). Off by default, same as publicProvidersEnabled:
+   * untrusted sources, and gated behind the same warning acknowledgment. */
+  aggregatedListsEnabled: boolean;
   maxConcurrentChecks: number;
 }
 
@@ -81,6 +85,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
     rotationInterval: 'manual',
     ipCheckUrl: 'https://api.ipify.org?format=json',
     publicProvidersEnabled: false,
+    aggregatedListsEnabled: false,
     maxConcurrentChecks: 10
   },
   customProviders: [],

@@ -14,6 +14,7 @@ import { ProxyValidator } from '../proxy/ProxyValidator';
 import { scoreProxy } from '../proxy/ProxyScorer';
 import { assignProxies, filterByCountry } from '../proxy/ProxyAssigner';
 import { PublicProxyProvider } from '../proxy/providers/PublicProxyProvider';
+import { ScraperCheckerProvider } from '../proxy/providers/ScraperCheckerProvider';
 import { ImportedProxyProvider } from '../proxy/providers/ImportedProxyProvider';
 import { CustomProxyProvider } from '../proxy/providers/CustomProxyProvider';
 import { logger } from './Logger';
@@ -67,6 +68,9 @@ export class ProxyManager extends EventEmitter {
 
     if (settings.proxy.publicProvidersEnabled) {
       providers.push(new PublicProxyProvider());
+    }
+    if (settings.proxy.aggregatedListsEnabled) {
+      providers.push(new ScraperCheckerProvider());
     }
     providers.push(new ImportedProxyProvider(() => this.importedProxies));
     for (const custom of settings.customProviders) {

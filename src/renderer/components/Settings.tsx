@@ -207,6 +207,14 @@ export function Settings(): JSX.Element {
           />
           Enable public proxy providers
         </label>
+        <label className="checkbox-label">
+          <input
+            type="checkbox"
+            checked={settings.proxy.aggregatedListsEnabled}
+            onChange={(e) => void apply({ proxy: { ...settings.proxy, aggregatedListsEnabled: e.target.checked } })}
+          />
+          Enable aggregated public lists (~70 sources, no country filtering)
+        </label>
 
         <h4>Custom / API Providers</h4>
         <ul className="provider-list">

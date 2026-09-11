@@ -18,6 +18,7 @@ export function ProxyToolbar(): JSX.Element {
 
   const [importOpen, setImportOpen] = useState(false);
   const [pendingPublicEnable, setPendingPublicEnable] = useState(false);
+  const [pendingAggregatedEnable, setPendingAggregatedEnable] = useState(false);
 
   async function reloadProxies() {
     setReloading(true);
@@ -30,11 +31,14 @@ export function ProxyToolbar(): JSX.Element {
         // source configured yet — public providers are off by default (see
         // the security warning) and nothing has been imported. Say that
         // plainly instead of a generic "0 found" that reads like a failure.
-        const noPublic = !settings.proxy.publicProvidersEnabled;
+        const noSourcesEnabled = !settings.proxy.publicProvidersEnabled && !settings.proxy.aggregatedListsEnabled;
+        const countrySelected = Boolean(selectedCountry);
         pushToast(
-          noPublic
-            ? 'No proxies found — public proxies are off (toggle "Public proxies" above, or use Import Proxies to add your own).'
-            : 'No proxies found from any enabled provider. Try a different country, or use Import Proxies to add your own.',
+          noSourcesEnabled
+            ? 'No proxies found — no public source is enabled (toggle "Public proxies" or "Aggregated lists" above, or use Import Proxies to add your own).'
+            : countrySelected
+              ? 'No proxies found for that country. The aggregated lists provider has no country data, so only "Public proxies" can match a specific country — try "Any Country", or use Import Proxies to add your own.'
+              : 'No proxies found from any enabled provider right now. Try again shortly, or use Import Proxies to add your own.',
           'info'
         );
       } else {
@@ -82,6 +86,16 @@ export function ProxyToolbar(): JSX.Element {
     void window.app.settings.update({ proxy: { ...settings.proxy, publicProvidersEnabled: enabled } }).then(setSettings);
   }
 
+  function toggleAggregatedLists(enabled: boolean) {
+    // Same untrusted-source risk as public providers, so it's gated behind
+    // the same acknowledgment rather than a second dialog.
+    if (enabled && !settings.publicProxyWarningAcknowledged) {
+      setPendingAggregatedEnable(true);
+      return;
+    }
+    void window.app.settings.update({ proxy: { ...settings.proxy, aggregatedListsEnabled: enabled } }).then(setSettings);
+  }
+
   return (
     <div className="proxy-toolbar">
       <div className="proxy-toolbar__group">
@@ -123,6 +137,14 @@ export function ProxyToolbar(): JSX.Element {
           />
           Public proxies
         </label>
+        <label className="checkbox-label">
+          <input
+            type="checkbox"
+            checked={settings.proxy.aggregatedListsEnabled}
+            onChange={(e) => toggleAggregatedLists(e.target.checked)}
+          />
+          Aggregated lists
+        </label>
       </div>
 
       <nav className="proxy-toolbar__nav">
@@ -153,6 +175,20 @@ export function ProxyToolbar(): JSX.Element {
               .update({
                 publicProxyWarningAcknowledged: true,
                 proxy: { ...settings.proxy, publicProvidersEnabled: true }
+              })
+              .then(setSettings);
+          }}
+        />
+      )}
+      {pendingAggregatedEnable && (
+        <PublicProxyWarningDialog
+          onCancel={() => setPendingAggregatedEnable(false)}
+          onContinue={() => {
+            setPendingAggregatedEnable(false);
+            void window.app.settings
+              .update({
+                publicProxyWarningAcknowledged: true,
+                proxy: { ...settings.proxy, aggregatedListsEnabled: true }
               })
               .then(setSettings);
           }}
