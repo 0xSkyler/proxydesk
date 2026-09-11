@@ -39,6 +39,7 @@ const IPC_CHANNELS = {
   browserCheckIp: 'browser:checkIp',
   browserCheckAllIps: 'browser:checkAllIps',
   browserRestart: 'browser:restart',
+  browserBroadcastSearch: 'browser:broadcastSearch',
   browserStateChanged: 'browser:stateChanged',
 
   proxyReload: 'proxy:reload',
@@ -80,6 +81,8 @@ const api: AppApi = {
     checkIp: (id) => ipcRenderer.invoke(IPC_CHANNELS.browserCheckIp, id),
     checkAllIps: () => ipcRenderer.invoke(IPC_CHANNELS.browserCheckAllIps),
     restart: (id) => ipcRenderer.invoke(IPC_CHANNELS.browserRestart, id),
+    broadcastSearch: (ids, query, matchText) =>
+      ipcRenderer.invoke(IPC_CHANNELS.browserBroadcastSearch, ids, query, matchText),
     onStateChanged: (cb) => {
       const listener = (_e: Electron.IpcRendererEvent, state: Parameters<typeof cb>[0]) => cb(state);
       ipcRenderer.on(IPC_CHANNELS.browserStateChanged, listener);

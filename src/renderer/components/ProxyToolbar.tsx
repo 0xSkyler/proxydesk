@@ -157,6 +157,9 @@ export function ProxyToolbar(): JSX.Element {
         <button className={activePanel === 'assignments' ? 'active' : ''} onClick={() => nav('assignments')}>
           Assignments
         </button>
+        <button className={activePanel === 'broadcast' ? 'active' : ''} onClick={() => nav('broadcast')}>
+          Broadcast Search
+        </button>
         <button className={activePanel === 'diagnostics' ? 'active' : ''} onClick={() => nav('diagnostics')}>
           Diagnostics
         </button>

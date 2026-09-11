@@ -1,6 +1,6 @@
 import { EventEmitter } from 'node:events';
 import { app, BrowserView, BrowserWindow, clipboard, session, type Session } from 'electron';
-import type { BrowserBounds, BrowserState } from '../shared/types/browser';
+import type { BroadcastSearchResult, BrowserBounds, BrowserState } from '../shared/types/browser';
 import type { ProxyRecord } from '../shared/types/proxy';
 import { EPHEMERAL_PARTITION_PREFIX, PARTITION_PREFIX } from '../shared/constants';
 import { logger } from './Logger';
@@ -320,6 +320,83 @@ export class BrowserManager extends EventEmitter {
     }
   }
 
+  /**
+   * Runs one browser's search-and-open workflow: load a Google results
+   * page for `query`, scan the organic results for one whose title or
+   * surrounding text contains `matchText`, and if found, navigate that
+   * browser to it. Used to fan the same (or a per-browser) search out
+   * across every workspace from one central command — each browser uses
+   * its own assigned proxy, so this naturally surfaces region-specific
+   * results too.
+   *
+   * This reads the results page's DOM once and never clicks anything
+   * automatically beyond the single matched link — it does not click
+   * through multiple results, does not repeat searches, and leaves the
+   * browser exactly where a person doing the same search by hand would
+   * end up. Google's result markup changes over time and this browser's
+   * proxy may get an interstitial ("unusual traffic") page instead of
+   * results — both are reported back as a distinct status rather than
+   * silently failing or guessing.
+   */
+  async broadcastSearch(id: number, query: string, matchText: string): Promise<BroadcastSearchResult> {
+    const managed = this.get(id);
+    const wc = managed.view.webContents;
+    const searchUrl = `https://www.google.com/search?q=${encodeURIComponent(query)}&num=20&hl=en`;
+    const ranAt = new Date().toISOString();
+
+    try {
+      await wc.loadURL(searchUrl);
+    } catch (err) {
+      return { browserId: id, status: 'error', error: `Failed to load search page: ${(err as Error).message}`, ranAt };
+    }
+
+    // loadURL's promise resolves on navigation commit, not on the results
+    // actually being painted — give the page a moment to render before
+    // reading its DOM.
+    await delay(1500);
+
+    let extracted: ExtractedSearchPage;
+    try {
+      extracted = (await wc.executeJavaScript(EXTRACT_GOOGLE_RESULTS_SCRIPT)) as ExtractedSearchPage;
+    } catch (err) {
+      return { browserId: id, status: 'error', error: `Failed to read search results: ${(err as Error).message}`, ranAt };
+    }
+
+    if (extracted.blocked) {
+      return { browserId: id, status: 'blocked', landedUrl: wc.getURL(), ranAt };
+    }
+
+    const results = extracted.results ?? [];
+    const needle = matchText.trim().toLowerCase();
+    const match = needle
+      ? results.find((r) => r.title.toLowerCase().includes(needle) || r.text.toLowerCase().includes(needle))
+      : results[0];
+
+    if (!match) {
+      return { browserId: id, status: 'no-match', landedUrl: wc.getURL(), resultsScanned: results.length, ranAt };
+    }
+
+    try {
+      await wc.loadURL(match.url);
+    } catch (err) {
+      return {
+        browserId: id,
+        status: 'error',
+        error: `Matched "${match.title}" but failed to open it: ${(err as Error).message}`,
+        ranAt
+      };
+    }
+
+    return {
+      browserId: id,
+      status: 'matched',
+      landedUrl: match.url,
+      matchedTitle: match.title,
+      resultsScanned: results.length,
+      ranAt
+    };
+  }
+
   async destroyBrowser(id: number): Promise<void> {
     const managed = this.browsers.get(id);
     if (!managed) return;
@@ -339,6 +416,58 @@ export class BrowserManager extends EventEmitter {
     clipboard.writeText(text);
   }
 }
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+interface ExtractedSearchPage {
+  blocked: boolean;
+  results?: Array<{ url: string; title: string; text: string }>;
+  scriptError?: string;
+}
+
+/**
+ * Runs inside the page (via executeJavaScript), not in this process — no
+ * access to Node or anything outside the DOM. Deliberately format-tolerant
+ * rather than tied to today's exact Google markup: any `<a>` that wraps an
+ * `<h3>` is treated as an organic result link (this has been the stable
+ * shape of Google's organic result anchors for years, independent of the
+ * surrounding layout classes that change often), and Google's own `/url?q=`
+ * redirect wrapper is unwrapped when present. Ads, "People also ask", and
+ * any other google.* links are skipped. An "unusual traffic" / consent
+ * interstitial is detected up front so a blocked run is never mistaken for
+ * a genuine zero-results page.
+ */
+const EXTRACT_GOOGLE_RESULTS_SCRIPT = `(function() {
+  try {
+    var loc = window.location.href;
+    if (/\\/sorry\\/|consent\\.google\\./.test(loc)) return { blocked: true };
+    var bodyText = (document.body && document.body.innerText) || '';
+    if (/unusual traffic|not a robot|recaptcha/i.test(bodyText.slice(0, 2000))) return { blocked: true };
+
+    var anchors = Array.prototype.slice.call(document.querySelectorAll('a'));
+    var seen = {};
+    var results = [];
+    anchors.forEach(function (a) {
+      var h3 = a.querySelector('h3');
+      if (!h3) return;
+      var href = a.getAttribute('href') || '';
+      var redirectMatch = href.match(/^\\/url\\?q=([^&]+)/);
+      if (redirectMatch) href = decodeURIComponent(redirectMatch[1]);
+      if (!/^https?:\\/\\//.test(href)) return;
+      if (/^https?:\\/\\/(www\\.)?google\\./.test(href)) return;
+      if (seen[href]) return;
+      seen[href] = true;
+      var container = a.closest('div') || a;
+      var text = container.innerText || a.innerText || '';
+      results.push({ url: href, title: h3.innerText || '', text: text.slice(0, 500) });
+    });
+    return { blocked: false, results: results.slice(0, 20) };
+  } catch (e) {
+    return { blocked: false, results: [], scriptError: String(e) };
+  }
+})()`;
 
 function normalizeUrl(input: string): string {
   const trimmed = input.trim();

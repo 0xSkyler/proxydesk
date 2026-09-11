@@ -1,4 +1,4 @@
-import type { BrowserState, BrowserBounds } from './browser';
+import type { BrowserState, BrowserBounds, BroadcastSearchResult } from './browser';
 import type {
   ProxyRecord,
   ProxyImportResult,
@@ -52,6 +52,7 @@ export interface AppApi {
     checkIp(id: number): Promise<IpCheckResult>;
     checkAllIps(): Promise<IpCheckResult[]>;
     restart(id: number): Promise<void>;
+    broadcastSearch(ids: number[], query: string, matchText: string): Promise<BroadcastSearchResult[]>;
     onStateChanged(cb: (state: BrowserState) => void): () => void;
   };
   proxy: {
@@ -97,6 +98,7 @@ export const IPC_CHANNELS = {
   browserCheckIp: 'browser:checkIp',
   browserCheckAllIps: 'browser:checkAllIps',
   browserRestart: 'browser:restart',
+  browserBroadcastSearch: 'browser:broadcastSearch',
   browserStateChanged: 'browser:stateChanged',
 
   proxyReload: 'proxy:reload',

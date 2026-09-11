@@ -5,7 +5,7 @@ import type { AppSettings } from '../../shared/types/settings';
 import { DEFAULT_SETTINGS } from '../../shared/types/settings';
 import { BROWSER_IDS } from '../../shared/types/browser';
 
-export type ActivePanel = 'grid' | 'proxyManager' | 'assignments' | 'settings' | 'diagnostics';
+export type ActivePanel = 'grid' | 'proxyManager' | 'assignments' | 'settings' | 'diagnostics' | 'broadcast';
 
 interface AppStoreState {
   browsers: Record<number, BrowserState>;

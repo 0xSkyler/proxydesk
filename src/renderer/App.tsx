@@ -8,6 +8,7 @@ import { ProxyManagerTable } from './components/ProxyManagerTable';
 import { BrowserAssignmentView } from './components/BrowserAssignmentView';
 import { Settings } from './components/Settings';
 import { DiagnosticsPanel } from './components/DiagnosticsPanel';
+import { BroadcastSearchPanel } from './components/BroadcastSearchPanel';
 import { Toasts } from './components/Toasts';
 import type { DiagnosticsInfo } from '../shared/types/ipc';
 
@@ -114,6 +115,7 @@ export default function App(): JSX.Element {
         {activePanel === 'assignments' && <BrowserAssignmentView />}
         {activePanel === 'settings' && <Settings />}
         {activePanel === 'diagnostics' && <DiagnosticsPanel />}
+        {activePanel === 'broadcast' && <BroadcastSearchPanel />}
       </main>
       <StatusBar />
       <Toasts />

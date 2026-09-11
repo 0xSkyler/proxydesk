@@ -56,6 +56,11 @@ export function registerIpc(deps: IpcDeps): void {
     );
   });
 
+  ipcMain.handle(IPC_CHANNELS.browserBroadcastSearch, async (_e, ids: number[], query: string, matchText: string) => {
+    const targets = ids.length > 0 ? ids : getBrowserIds();
+    return Promise.all(targets.map((id) => browserManager.broadcastSearch(id, query, matchText)));
+  });
+
   ipcMain.handle(IPC_CHANNELS.proxyReload, (_e, countryCode: string | null) =>
     proxyManager.reload(getBrowserIds(), countryCode)
   );
