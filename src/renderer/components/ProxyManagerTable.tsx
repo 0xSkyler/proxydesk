@@ -97,7 +97,12 @@ export function ProxyManagerTable(): JSX.Element {
               </td>
               <td>{p.countryVerified ? countryNameForCode(p.countryCode) ?? p.countryCode : 'Unverified'}</td>
               <td>{p.protocol.toUpperCase()}</td>
-              <td>{p.latencyMs != null ? `${p.latencyMs} ms` : 'timeout'}</td>
+              {/* latencyMs is only absent when this proxy hasn't been
+                  validated yet (status 'unknown'/'checking') — it does NOT
+                  mean the check timed out, so don't label it that way; a
+                  proxy that actually failed on timeout still gets a status
+                  of 'dead' with an error, shown in the Status column. */}
+              <td>{p.latencyMs != null ? `${p.latencyMs} ms` : p.status === 'unknown' ? 'Not checked' : '—'}</td>
               <td>{p.score}</td>
               <td>
                 {p.status === 'working' && <span className="status-ok">✓ Working</span>}

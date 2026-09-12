@@ -123,4 +123,10 @@ export function registerIpc(deps: IpcDeps): void {
       win.webContents.send(IPC_CHANNELS.proxyAssignmentsChanged, summary);
     }
   });
+
+  proxyManager.on('reloadProgress', (progress) => {
+    for (const win of BrowserWindow.getAllWindows()) {
+      win.webContents.send(IPC_CHANNELS.proxyReloadProgress, progress);
+    }
+  });
 }

@@ -53,6 +53,7 @@ const IPC_CHANNELS = {
   proxyExport: 'proxy:export',
   proxyProviderHealth: 'proxy:providerHealth',
   proxyAssignmentsChanged: 'proxy:assignmentsChanged',
+  proxyReloadProgress: 'proxy:reloadProgress',
 
   settingsGet: 'settings:get',
   settingsUpdate: 'settings:update',
@@ -104,6 +105,11 @@ const api: AppApi = {
       const listener = (_e: Electron.IpcRendererEvent, summary: Parameters<typeof cb>[0]) => cb(summary);
       ipcRenderer.on(IPC_CHANNELS.proxyAssignmentsChanged, listener);
       return () => ipcRenderer.removeListener(IPC_CHANNELS.proxyAssignmentsChanged, listener);
+    },
+    onReloadProgress: (cb) => {
+      const listener = (_e: Electron.IpcRendererEvent, progress: Parameters<typeof cb>[0]) => cb(progress);
+      ipcRenderer.on(IPC_CHANNELS.proxyReloadProgress, listener);
+      return () => ipcRenderer.removeListener(IPC_CHANNELS.proxyReloadProgress, listener);
     }
   },
   settings: {

@@ -51,6 +51,13 @@ export interface ProxyValidationResult {
   checkedAt: string;
 }
 
+export interface ReloadProgress {
+  /** How many candidates have finished validating so far. */
+  checked: number;
+  /** Total candidates being validated this reload. */
+  total: number;
+}
+
 export interface ProxyProviderHealth {
   name: string;
   lastRunAt?: string;

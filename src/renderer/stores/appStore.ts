@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import type { BrowserState } from '../../shared/types/browser';
-import type { ProxyProviderHealth, ProxyRecord, ReloadProxiesSummary } from '../../shared/types/proxy';
+import type { ProxyProviderHealth, ProxyRecord, ReloadProgress, ReloadProxiesSummary } from '../../shared/types/proxy';
 import type { AppSettings } from '../../shared/types/settings';
 import { DEFAULT_SETTINGS } from '../../shared/types/settings';
 import { BROWSER_IDS } from '../../shared/types/browser';
@@ -16,6 +16,7 @@ interface AppStoreState {
   activePanel: ActivePanel;
   lastReloadSummary: ReloadProxiesSummary | null;
   isReloadingProxies: boolean;
+  reloadProgress: ReloadProgress | null;
   toasts: Array<{ id: string; message: string; kind: 'info' | 'error' | 'success' }>;
 
   setBrowsers(list: BrowserState[]): void;
@@ -27,6 +28,7 @@ interface AppStoreState {
   setActivePanel(panel: ActivePanel): void;
   setReloadSummary(summary: ReloadProxiesSummary): void;
   setReloading(value: boolean): void;
+  setReloadProgress(progress: ReloadProgress | null): void;
   pushToast(message: string, kind?: 'info' | 'error' | 'success'): void;
   dismissToast(id: string): void;
 }
@@ -55,6 +57,7 @@ export const useAppStore = create<AppStoreState>((set) => ({
   activePanel: 'grid',
   lastReloadSummary: null,
   isReloadingProxies: false,
+  reloadProgress: null,
   toasts: [],
 
   setBrowsers: (list) => set({ browsers: Object.fromEntries(list.map((b) => [b.id, b])) }),
@@ -73,6 +76,7 @@ export const useAppStore = create<AppStoreState>((set) => ({
       return { lastReloadSummary: summary, browsers };
     }),
   setReloading: (value) => set({ isReloadingProxies: value }),
+  setReloadProgress: (progress) => set({ reloadProgress: progress }),
   pushToast: (message, kind = 'info') =>
     set((s) => ({ toasts: [...s.toasts, { id: `${Date.now()}-${Math.random()}`, message, kind }] })),
   dismissToast: (id) => set((s) => ({ toasts: s.toasts.filter((t) => t.id !== id) }))

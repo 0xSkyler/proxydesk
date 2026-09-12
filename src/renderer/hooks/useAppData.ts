@@ -13,6 +13,7 @@ export function useAppData(): void {
   const setSettings = useAppStore((s) => s.setSettings);
   const setReloadSummary = useAppStore((s) => s.setReloadSummary);
   const setProviderHealth = useAppStore((s) => s.setProviderHealth);
+  const setReloadProgress = useAppStore((s) => s.setReloadProgress);
 
   useEffect(() => {
     let cancelled = false;
@@ -36,13 +37,16 @@ export function useAppData(): void {
     const offBrowser = window.app.browser.onStateChanged((state) => upsertBrowser(state));
     const offProxy = window.app.proxy.onAssignmentsChanged((summary) => {
       setReloadSummary(summary);
+      setReloadProgress(null);
       void window.app.proxy.getAll().then(setProxies);
     });
+    const offProgress = window.app.proxy.onReloadProgress((progress) => setReloadProgress(progress));
 
     return () => {
       cancelled = true;
       offBrowser();
       offProxy();
+      offProgress();
     };
-  }, [setBrowsers, upsertBrowser, setProxies, setSettings, setReloadSummary, setProviderHealth]);
+  }, [setBrowsers, upsertBrowser, setProxies, setSettings, setReloadSummary, setProviderHealth, setReloadProgress]);
 }

@@ -9,6 +9,8 @@ export function ProxyToolbar(): JSX.Element {
   const setSelectedCountry = useAppStore((s) => s.setSelectedCountry);
   const isReloading = useAppStore((s) => s.isReloadingProxies);
   const setReloading = useAppStore((s) => s.setReloading);
+  const reloadProgress = useAppStore((s) => s.reloadProgress);
+  const setReloadProgress = useAppStore((s) => s.setReloadProgress);
   const setReloadSummary = useAppStore((s) => s.setReloadSummary);
   const pushToast = useAppStore((s) => s.pushToast);
   const setActivePanel = useAppStore((s) => s.setActivePanel);
@@ -22,6 +24,7 @@ export function ProxyToolbar(): JSX.Element {
 
   async function reloadProxies() {
     setReloading(true);
+    setReloadProgress(null);
     try {
       const summary = await window.app.proxy.reload(selectedCountry);
       setReloadSummary(summary);
@@ -60,6 +63,7 @@ export function ProxyToolbar(): JSX.Element {
       pushToast(`Proxy reload failed: ${(err as Error).message}`, 'error');
     } finally {
       setReloading(false);
+      setReloadProgress(null);
     }
   }
 
@@ -121,7 +125,11 @@ export function ProxyToolbar(): JSX.Element {
 
       <div className="proxy-toolbar__group">
         <button className="btn-primary" disabled={isReloading} onClick={() => void reloadProxies()}>
-          {isReloading ? 'Reloading…' : '↻ Reload Proxies'}
+          {isReloading
+            ? reloadProgress
+              ? `Checking ${reloadProgress.checked}/${reloadProgress.total}…`
+              : 'Fetching sources…'
+            : '↻ Reload Proxies'}
         </button>
         <button onClick={() => setImportOpen(true)}>Import Proxies</button>
         <button onClick={() => void validateAll()}>Validate All</button>

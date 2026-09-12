@@ -3,6 +3,7 @@ import type {
   ProxyRecord,
   ProxyImportResult,
   ProxyProviderHealth,
+  ReloadProgress,
   ReloadProxiesSummary
 } from './proxy';
 import type { AppSettings } from './settings';
@@ -67,6 +68,7 @@ export interface AppApi {
     exportProxies(format: 'txt' | 'csv' | 'json'): Promise<string>;
     getProviderHealth(): Promise<ProxyProviderHealth[]>;
     onAssignmentsChanged(cb: (summary: ReloadProxiesSummary) => void): () => void;
+    onReloadProgress(cb: (progress: ReloadProgress) => void): () => void;
   };
   settings: {
     get(): Promise<AppSettings>;
@@ -112,6 +114,7 @@ export const IPC_CHANNELS = {
   proxyExport: 'proxy:export',
   proxyProviderHealth: 'proxy:providerHealth',
   proxyAssignmentsChanged: 'proxy:assignmentsChanged',
+  proxyReloadProgress: 'proxy:reloadProgress',
 
   settingsGet: 'settings:get',
   settingsUpdate: 'settings:update',

@@ -88,7 +88,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
     autoLoadOnStartup: true,
     autoReplaceFailed: true,
     validationEnabled: true,
-    validationTimeoutMs: 8000,
+    validationTimeoutMs: 6000,
     allowProxyReuse: false,
     preferredProtocols: ['http', 'https', 'socks4', 'socks5'],
     preferredCountryCode: null,
@@ -96,8 +96,8 @@ export const DEFAULT_SETTINGS: AppSettings = {
     ipCheckUrl: 'https://api.ipify.org?format=json',
     publicProvidersEnabled: false,
     aggregatedListsEnabled: false,
-    maxConcurrentChecks: 15,
-    maxCandidatesPerReload: 400
+    maxConcurrentChecks: 25,
+    maxCandidatesPerReload: 250
   },
   customProviders: [],
   performance: {

@@ -12,6 +12,15 @@ export interface ValidateOptions {
   signal?: AbortSignal;
 }
 
+export interface ValidateManyOptions extends ValidateOptions {
+  maxConcurrent?: number;
+  /** Called after each individual proxy finishes validating (not in any
+   * particular order, since workers run concurrently) — lets a long batch
+   * report "checked N/total" instead of leaving the caller with no signal
+   * until the entire batch resolves. */
+  onProgress?: (checked: number, total: number) => void;
+}
+
 function buildAgentUrl(proxy: ProxyRecord): string {
   const auth = proxy.username
     ? `${encodeURIComponent(proxy.username)}:${encodeURIComponent(proxy.password ?? '')}@`
@@ -139,16 +148,19 @@ export class ProxyValidator {
   /** Runs validations with bounded concurrency so 10+ checks never overwhelm the network stack. */
   static async validateMany(
     proxies: ProxyRecord[],
-    options: ValidateOptions & { maxConcurrent?: number } = {}
+    options: ValidateManyOptions = {}
   ): Promise<ProxyValidationResult[]> {
     const maxConcurrent = Math.max(1, options.maxConcurrent ?? 10);
     const results: ProxyValidationResult[] = new Array(proxies.length);
     let cursor = 0;
+    let completed = 0;
 
     async function worker() {
       while (cursor < proxies.length) {
         const index = cursor++;
         results[index] = await ProxyValidator.validate(proxies[index], options);
+        completed++;
+        options.onProgress?.(completed, proxies.length);
       }
     }
 

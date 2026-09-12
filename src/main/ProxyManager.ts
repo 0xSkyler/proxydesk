@@ -5,6 +5,7 @@ import type {
   ProxyProvider,
   ProxyProviderHealth,
   ProxyRecord,
+  ReloadProgress,
   ReloadProxiesSummary
 } from '../shared/types/proxy';
 import type { SettingsManager } from './SettingsManager';
@@ -27,6 +28,8 @@ const ASSIGNMENTS_KEY = 'assignments';
 export declare interface ProxyManager {
   on(event: 'assignmentsChanged', listener: (summary: ReloadProxiesSummary) => void): this;
   emit(event: 'assignmentsChanged', summary: ReloadProxiesSummary): boolean;
+  on(event: 'reloadProgress', listener: (progress: ReloadProgress) => void): this;
+  emit(event: 'reloadProgress', progress: ReloadProgress): boolean;
 }
 
 // eslint-disable-next-line @typescript-eslint/no-unsafe-declaration-merging -- standard Node EventEmitter typed-events pattern
@@ -187,11 +190,13 @@ export class ProxyManager extends EventEmitter {
     }
 
     if (settings.proxy.validationEnabled && candidates.length > 0) {
+      this.emit('reloadProgress', { checked: 0, total: candidates.length });
       const results = await ProxyValidator.validateMany(candidates, {
         timeoutMs: settings.proxy.validationTimeoutMs,
         ipCheckUrl: settings.proxy.ipCheckUrl,
         maxConcurrent: settings.proxy.maxConcurrentChecks,
-        signal: controller.signal
+        signal: controller.signal,
+        onProgress: (checked, total) => this.emit('reloadProgress', { checked, total })
       });
       for (const result of results) {
         const proxy = this.allProxies.get(result.proxyId);
