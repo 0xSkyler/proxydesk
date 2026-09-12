@@ -8,10 +8,10 @@ import { parseBulkText } from '../ProxyParser';
  * page meant for humans, requires no CAPTCHA bypass or auth circumvention,
  * and simply returns a plaintext proxy list.
  *
- * Country metadata: this free endpoint does not reliably label every proxy
- * with a country, so entries from it are marked `countryVerified: false`
- * unless a query param constrained the result set to a single requested
- * country — see the comment below.
+ * Country metadata: results are only marked `countryVerified: true` when a
+ * country was requested and the API's own `country` filter constrained the
+ * result set to it server-side; an unfiltered ("any country") fetch is
+ * marked unverified since this endpoint doesn't reliably self-report it.
  */
 export class PublicProxyProvider implements ProxyProvider {
   readonly name = 'ProxyScrape (public)';
@@ -25,11 +25,30 @@ export class PublicProxyProvider implements ProxyProvider {
 
   async fetchProxies(options: ProxyFetchOptions): Promise<ProxyRecord[]> {
     const results: ProxyRecord[] = [];
+    const failures: string[] = [];
 
     for (const [protocol, url] of Object.entries(this.endpoints) as Array<
       [keyof typeof this.endpoints, string]
     >) {
-      const text = await this.fetchOne(url, options.signal);
+      // ProxyScrape's v2 API accepts a `country` query param (ISO 3166-1
+      // alpha-2, matching the codes in shared/constants/countries.ts) and
+      // returns only proxies it has actually geo-tagged as that country —
+      // so when the user picked a country, ask the API to filter server
+      // side instead of fetching the unfiltered list and then discarding
+      // it. (Previously this always returned [] whenever a country was
+      // selected, "to avoid mislabeling" — but that made every country
+      // selection a guaranteed dead end for this provider, which is why
+      // reload kept finding 0 proxies no matter what was picked.)
+      const requestUrl = options.countryCode
+        ? `${url}&country=${options.countryCode.toLowerCase()}`
+        : url;
+
+      const outcome = await this.fetchOne(requestUrl, options.signal);
+      if (outcome.error) {
+        failures.push(`${protocol}: ${outcome.error}`);
+        continue;
+      }
+      const text = outcome.text;
       if (!text) continue;
 
       // The plaintext format is `host:port` per line with no protocol prefix,
@@ -41,21 +60,33 @@ export class PublicProxyProvider implements ProxyProvider {
         .join('\n');
 
       const { proxies } = parseBulkText(prefixed, this.name);
+
+      // When the API filtered by country for us, that's a source we trust —
+      // mark it verified rather than leaving it as unknown.
+      if (options.countryCode) {
+        for (const p of proxies) {
+          p.countryCode = options.countryCode;
+          p.countryVerified = true;
+        }
+      }
+
       results.push(...proxies);
     }
 
-    // This provider cannot verify country per-proxy from the free endpoint,
-    // so we honestly report country as unknown rather than guessing.
-    if (options.countryCode) {
-      // No reliable per-proxy country data available — return nothing rather
-      // than mislabeling proxies with a guessed country.
-      return [];
+    // If every endpoint failed outright (network error, timeout, blocked,
+    // rate-limited, etc.) that is a real problem worth surfacing as a
+    // provider error rather than a silent "0 proxies found" that looks
+    // identical to the endpoints simply having nothing to return. A partial
+    // failure (some endpoints ok, some not) stays silent — the pipeline
+    // already continues with whatever succeeded.
+    if (failures.length === Object.keys(this.endpoints).length) {
+      throw new Error(`All endpoints unreachable (${failures.join('; ')})`);
     }
 
     return results;
   }
 
-  private async fetchOne(url: string, signal?: AbortSignal): Promise<string | null> {
+  private async fetchOne(url: string, signal?: AbortSignal): Promise<{ text: string | null; error?: string }> {
     try {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), 10000);
@@ -64,15 +95,25 @@ export class PublicProxyProvider implements ProxyProvider {
         else signal.addEventListener('abort', () => controller.abort(), { once: true });
       }
 
-      const response = await fetch(url, { signal: controller.signal });
-      clearTimeout(timer);
-
-      if (!response.ok) return null;
-      return await response.text();
-    } catch {
-      // Network failure, timeout, or the endpoint being unreachable — the
-      // provider fails gracefully and the rest of the pipeline continues.
-      return null;
+      try {
+        const response = await fetch(url, { signal: controller.signal });
+        if (!response.ok) return { text: null, error: `HTTP ${response.status}` };
+        // The abort timer must stay armed through the body read, not just
+        // until headers arrive — clearing it right after fetch() resolves
+        // (as this used to do) left response.text() with no timeout at
+        // all, so a source that answers with headers promptly but then
+        // stalls or trickles its body could hang this fetch forever, which
+        // hangs the whole provider's Promise.all, which hangs the whole
+        // reload — including proxies that had nothing to do with this
+        // provider, like imported ones, since reload() awaits every
+        // provider before doing anything else.
+        return { text: await response.text() };
+      } finally {
+        clearTimeout(timer);
+      }
+    } catch (err) {
+      // Network failure, timeout, or the endpoint being unreachable.
+      return { text: null, error: err instanceof Error ? err.message : String(err) };
     }
   }
 }

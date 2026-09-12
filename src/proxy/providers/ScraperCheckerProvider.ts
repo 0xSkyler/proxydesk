@@ -245,14 +245,23 @@ export class ScraperCheckerProvider implements ProxyProvider {
         else signal.addEventListener('abort', () => controller.abort(), { once: true });
       }
 
-      const response = await fetch(url, {
-        signal: controller.signal,
-        headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) ProxyDesk' }
-      });
-      clearTimeout(timer);
-
-      if (!response.ok) return null;
-      return await response.text();
+      try {
+        const response = await fetch(url, {
+          signal: controller.signal,
+          headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) ProxyDesk' }
+        });
+        if (!response.ok) return null;
+        // See PublicProxyProvider's fetchOne for why the timer must stay
+        // armed through the body read (via `finally`) instead of being
+        // cleared right after fetch() resolves — clearing it early left a
+        // slow-body source able to hang this fetch, and with ~90 fetches
+        // across a worker pool whose outer Promise.all this file's caller
+        // (and ProxyManager.reload) awaits, one stuck source was enough to
+        // hang the entire reload, imported proxies included.
+        return await response.text();
+      } finally {
+        clearTimeout(timer);
+      }
     } catch {
       // Network failure, timeout, DNS failure, or the source being gone —
       // fails gracefully so the rest of the sources still get a chance.

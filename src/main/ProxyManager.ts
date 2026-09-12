@@ -120,7 +120,21 @@ export class ProxyManager extends EventEmitter {
           enabled: true
         };
         try {
-          const result = await provider.fetchProxies({ countryCode: countryCode ?? undefined, signal: controller.signal });
+          // Belt-and-suspenders: providers are expected to honor `signal`
+          // and their own internal per-request timeouts, but a single
+          // provider that hangs for any reason (a bug, a source whose
+          // response stalls mid-body in a way its own timeout didn't
+          // catch) would otherwise block this whole Promise.all forever —
+          // which blocks everything downstream, including assigning
+          // proxies that have nothing to do with the stuck provider, like
+          // imported ones. This hard outer deadline guarantees reload()
+          // always finishes within a bounded time no matter what any one
+          // provider does.
+          const result = await withTimeout(
+            provider.fetchProxies({ countryCode: countryCode ?? undefined, signal: controller.signal }),
+            PROVIDER_FETCH_TIMEOUT_MS,
+            `Provider "${provider.name}" timed out after ${PROVIDER_FETCH_TIMEOUT_MS}ms`
+          );
           fetched.push(...result);
           health.lastRunAt = new Date().toISOString();
           health.lastSuccessAt = health.lastRunAt;
@@ -372,6 +386,31 @@ export class ProxyManager extends EventEmitter {
 function stripSecretsForList(proxy: ProxyRecord): ProxyRecord {
   if (!proxy.password) return proxy;
   return { ...proxy, password: '••••••••' };
+}
+
+/** Hard ceiling on how long ProxyManager.reload() will wait for any single
+ * provider's fetchProxies() to settle, regardless of what that provider
+ * does internally. ScraperCheckerProvider alone can take up to roughly
+ * (source count / concurrency) * per-fetch timeout in the worst case
+ * (~90 sources / 12 concurrent * 10s ≈ 75s), so this is set comfortably
+ * above that rather than the per-fetch timeout itself. */
+const PROVIDER_FETCH_TIMEOUT_MS = 90000;
+
+/** Exported for unit testing — see tests/withTimeout.test.ts. */
+export function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(message)), ms);
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (err) => {
+        clearTimeout(timer);
+        reject(err);
+      }
+    );
+  });
 }
 
 /** Fisher-Yates shuffle, used to take a fair random sample of candidates
