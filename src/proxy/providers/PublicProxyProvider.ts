@@ -23,6 +23,20 @@ export class PublicProxyProvider implements ProxyProvider {
     socks5: 'https://api.proxyscrape.com/v2/?request=getproxies&protocol=socks5&timeout=10000&format=textplain'
   };
 
+  /**
+   * ProxyScrape's newer v4 endpoint, requested with `proxy_format=
+   * protocolipport` so each line already comes back as `protocol://host:
+   * port` — no manual per-protocol prefixing needed like the v2 endpoints
+   * above. Used only as an extra "any country" source (no documented
+   * `country` filter param the way v2 has, unlike v2 where that's
+   * confirmed) — kept separate rather than replacing v2, since dedup
+   * means the two overlapping is harmless and having both means one
+   * API version drifting or being retired doesn't lose this provider
+   * entirely.
+   */
+  private readonly v4AllProtocolsUrl =
+    'https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&proxy_format=protocolipport&format=text';
+
   async fetchProxies(options: ProxyFetchOptions): Promise<ProxyRecord[]> {
     const results: ProxyRecord[] = [];
     const failures: string[] = [];
@@ -73,13 +87,33 @@ export class PublicProxyProvider implements ProxyProvider {
       results.push(...proxies);
     }
 
+    let attempted = Object.keys(this.endpoints).length;
+
+    // The v4 "all protocols" endpoint has no documented country filter
+    // (unlike v2's confirmed `country` param above), so it's only used for
+    // an unfiltered ("Any Country") fetch — a country-specific reload
+    // relies on the v2 endpoints' server-side filtering instead.
+    if (!options.countryCode) {
+      attempted++;
+      const outcome = await this.fetchOne(this.v4AllProtocolsUrl, options.signal);
+      if (outcome.error) {
+        failures.push(`v4: ${outcome.error}`);
+      } else if (outcome.text) {
+        // proxy_format=protocolipport already returns e.g.
+        // "socks5://1.2.3.4:1080" per line, so this needs no manual
+        // protocol prefixing the way the v2 endpoints do above.
+        const { proxies } = parseBulkText(outcome.text, this.name);
+        results.push(...proxies);
+      }
+    }
+
     // If every endpoint failed outright (network error, timeout, blocked,
     // rate-limited, etc.) that is a real problem worth surfacing as a
     // provider error rather than a silent "0 proxies found" that looks
     // identical to the endpoints simply having nothing to return. A partial
     // failure (some endpoints ok, some not) stays silent — the pipeline
     // already continues with whatever succeeded.
-    if (failures.length === Object.keys(this.endpoints).length) {
+    if (failures.length === attempted) {
       throw new Error(`All endpoints unreachable (${failures.join('; ')})`);
     }
 

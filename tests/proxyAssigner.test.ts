@@ -101,6 +101,29 @@ describe('assignProxies', () => {
     const assignments = assignProxies(proxies, { browserIds: [5, 3, 1, 2, 4], allowProxyReuse: false });
     expect(assignments.map((a) => a.browserId)).toEqual([5, 3, 1, 2, 4]);
   });
+
+  it('prefers spreading assignments across different /24 subnets over always taking the top few by score', () => {
+    // Two proxies in 10.0.0.x rank higher than the rest, but assigning both
+    // of them plus nothing else would put half the browsers on one subnet.
+    const proxies = [
+      makeWorkingProxy('10.0.0.1', 10),
+      makeWorkingProxy('10.0.0.2', 20),
+      makeWorkingProxy('20.0.0.1', 30),
+      makeWorkingProxy('30.0.0.1', 40)
+    ];
+    const assignments = assignProxies(proxies, { browserIds: [1, 2, 3], allowProxyReuse: false });
+    const hosts = assignments.map((a) => a.proxy!.host);
+    const subnets = new Set(hosts.map((h) => h.split('.').slice(0, 3).join('.')));
+    // 3 browsers, 3 distinct subnets available — diversity should win over
+    // picking the two best-ranked 10.0.0.x proxies plus one more.
+    expect(subnets.size).toBe(3);
+  });
+
+  it('falls back to a repeated subnet rather than leaving a browser unassigned', () => {
+    const proxies = [makeWorkingProxy('10.0.0.1', 10), makeWorkingProxy('10.0.0.2', 20)];
+    const assignments = assignProxies(proxies, { browserIds: [1, 2], allowProxyReuse: false });
+    expect(assignments.every((a) => a.proxy !== null)).toBe(true);
+  });
 });
 
 describe('scoreProxy', () => {
