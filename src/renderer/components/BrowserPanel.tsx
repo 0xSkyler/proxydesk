@@ -4,6 +4,9 @@ import { countryNameForCode } from '../../shared/constants/countries';
 
 interface Props {
   id: number;
+  /** Renders a slimmer header/toolbar/footer so a small square tile spends
+   * most of its area on the actual page content instead of chrome. */
+  compact?: boolean;
 }
 
 const STATUS_LABEL: Record<string, string> = {
@@ -26,7 +29,7 @@ const STATUS_DOT: Record<string, string> = {
   crashed: 'dot-red'
 };
 
-export function BrowserPanel({ id }: Props): JSX.Element {
+export function BrowserPanel({ id, compact = false }: Props): JSX.Element {
   const browser = useAppStore((s) => s.browsers[id]);
   const viewportRef = useRef<HTMLDivElement>(null);
   const [addressValue, setAddressValue] = useState(browser?.url ?? '');
@@ -53,9 +56,20 @@ export function BrowserPanel({ id }: Props): JSX.Element {
     const observer = new ResizeObserver(reportBounds);
     if (viewportRef.current) observer.observe(viewportRef.current);
     window.addEventListener('resize', reportBounds);
+    // The real Chromium content is a native BrowserView positioned by
+    // absolute screen coordinates (see reportBounds above), which only ever
+    // gets re-measured here — it does not move on its own when the page
+    // scrolls. The old fixed-height grid never scrolled so this didn't
+    // matter, but the square/mobile tile grid uses overflow-y as a safety
+    // net once there are more tiles than fit on screen, so without this a
+    // scroll would leave every BrowserView visually "stuck" in its old
+    // position while the tile it belongs to moved out from under it.
+    // Capture phase is required since 'scroll' does not bubble.
+    window.addEventListener('scroll', reportBounds, true);
     return () => {
       observer.disconnect();
       window.removeEventListener('resize', reportBounds);
+      window.removeEventListener('scroll', reportBounds, true);
     };
   }, [reportBounds]);
 
@@ -65,6 +79,88 @@ export function BrowserPanel({ id }: Props): JSX.Element {
     e.preventDefault();
     if (addressValue.trim()) void window.app.browser.navigate(id, addressValue.trim());
   };
+
+  const menu = menuOpen && (
+    <div className="browser-panel__menu-list" role="menu">
+      <button onClick={() => { void window.app.browser.clearCookies(id); setMenuOpen(false); }}>
+        Clear Cookies
+      </button>
+      <button onClick={() => { void window.app.browser.clearCache(id); setMenuOpen(false); }}>
+        Clear Cache
+      </button>
+      <button onClick={() => { void window.app.browser.openDevTools(id); setMenuOpen(false); }}>
+        Open DevTools
+      </button>
+      <button onClick={() => { void window.app.browser.restart(id); setMenuOpen(false); }}>
+        Restart Browser
+      </button>
+    </div>
+  );
+
+  const viewport = (
+    // This div's bounding rect is where the main process positions the
+    // real BrowserView (the actual Chromium content) — see reportBounds
+    // above and BrowserManager.setBounds in the main process.
+    <div className="browser-panel__viewport" ref={viewportRef}>
+      {browser.connectionStatus === 'crashed' && (
+        <div className="browser-panel__overlay">
+          <p>{browser.label} crashed.</p>
+          <button onClick={() => void window.app.browser.restart(id)}>Restart</button>
+        </div>
+      )}
+    </div>
+  );
+
+  if (compact) {
+    // Small square tile: one slim header row (label, status, nav + menu)
+    // and one slim footer row (proxy only), so the viewport — the actual
+    // page content, which is the entire point of a tile you can glance
+    // at — gets the large majority of the square instead of being
+    // squeezed down to a sliver by full-size chrome.
+    return (
+      <section
+        className="browser-panel browser-panel--compact"
+        onMouseEnter={() => void window.app.browser.setActive(id)}
+        aria-label={browser.label}
+      >
+        <header className="browser-panel__header">
+          <span className={`status-dot ${STATUS_DOT[browser.connectionStatus] ?? 'dot-gray'}`} />
+          <span className="browser-panel__title">{browser.label}</span>
+          <div className="browser-panel__toolbar browser-panel__toolbar--compact">
+            <button aria-label="Back" disabled={!browser.canGoBack} onClick={() => void window.app.browser.goBack(id)}>
+              &#8592;
+            </button>
+            {browser.loading ? (
+              <button aria-label="Stop loading" onClick={() => void window.app.browser.stop(id)}>
+                &#10005;
+              </button>
+            ) : (
+              <button aria-label="Reload" onClick={() => void window.app.browser.reload(id)}>
+                &#8635;
+              </button>
+            )}
+            <div className="browser-panel__menu">
+              <button aria-label="Browser menu" onClick={() => setMenuOpen((v) => !v)}>
+                &#8942;
+              </button>
+              {menu}
+            </div>
+          </div>
+        </header>
+
+        {viewport}
+
+        <footer className="browser-panel__footer browser-panel__footer--compact">
+          <span title={browser.proxy ? `${browser.proxy.host}:${browser.proxy.port}` : 'No proxy'}>
+            {browser.proxy ? `${browser.proxy.host}:${browser.proxy.port}` : 'No proxy'}
+          </span>
+          <button aria-label="Change proxy" title="Change Proxy" onClick={() => void window.app.proxy.replaceFailed(id)}>
+            &#8635;
+          </button>
+        </footer>
+      </section>
+    );
+  }
 
   return (
     <section
@@ -110,36 +206,11 @@ export function BrowserPanel({ id }: Props): JSX.Element {
           <button aria-label="Browser menu" onClick={() => setMenuOpen((v) => !v)}>
             &#8942;
           </button>
-          {menuOpen && (
-            <div className="browser-panel__menu-list" role="menu">
-              <button onClick={() => { void window.app.browser.clearCookies(id); setMenuOpen(false); }}>
-                Clear Cookies
-              </button>
-              <button onClick={() => { void window.app.browser.clearCache(id); setMenuOpen(false); }}>
-                Clear Cache
-              </button>
-              <button onClick={() => { void window.app.browser.openDevTools(id); setMenuOpen(false); }}>
-                Open DevTools
-              </button>
-              <button onClick={() => { void window.app.browser.restart(id); setMenuOpen(false); }}>
-                Restart Browser
-              </button>
-            </div>
-          )}
+          {menu}
         </div>
       </div>
 
-      {/* This div's bounding rect is where the main process positions the
-          real BrowserView (the actual Chromium content) — see reportBounds
-          above and BrowserManager.setBounds in the main process. */}
-      <div className="browser-panel__viewport" ref={viewportRef}>
-        {browser.connectionStatus === 'crashed' && (
-          <div className="browser-panel__overlay">
-            <p>{browser.label} crashed.</p>
-            <button onClick={() => void window.app.browser.restart(id)}>Restart</button>
-          </div>
-        )}
-      </div>
+      {viewport}
 
       <footer className="browser-panel__footer">
         <span>

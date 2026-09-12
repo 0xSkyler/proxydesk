@@ -77,6 +77,7 @@ export function Settings(): JSX.Element {
             <option value="1x10">1 column</option>
             <option value="2x5">2 columns</option>
             <option value="5x2">5 columns</option>
+            <option value="square">Square tiles (mobile-like)</option>
           </select>
         </label>
         <label className="checkbox-label">

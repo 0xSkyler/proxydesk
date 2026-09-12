@@ -164,3 +164,68 @@
     grid-template-columns: 1fr !important;
   }
 }
+
+/* "square" grid layout: small, mobile-icon-like tiles instead of a few
+   panels stretched to fill the window. The fixed-column layouts above use
+   grid-auto-rows: 1fr, which stretches every row to fill 100% of the
+   container's height regardless of how narrow the columns are — with 2
+   columns and 5 rows that squeezed browser-panel__viewport down to a few
+   pixels tall, which is why the actual page content wasn't visible even
+   though the browser itself was working fine. Here rows size themselves
+   to the column width instead (via aspect-ratio on the tile), so every
+   tile stays a small square no matter how many there are, and the grid
+   scrolls (rather than compressing further) if they don't all fit. */
+.browser-grid--square {
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  grid-auto-rows: auto;
+  align-content: start;
+  overflow-y: auto;
+}
+
+.browser-grid--square > .browser-panel {
+  aspect-ratio: 1 / 1;
+}
+
+.browser-panel--compact .browser-panel__header {
+  padding: 4px 6px;
+  gap: 6px;
+  font-size: 11px;
+}
+
+.browser-panel--compact .browser-panel__title {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.browser-panel__toolbar--compact {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 0;
+  border-bottom: none;
+  position: relative;
+}
+
+.browser-panel__toolbar--compact button {
+  padding: 1px 4px;
+  font-size: 11px;
+}
+
+.browser-panel__footer--compact {
+  padding: 3px 6px;
+  font-size: 10px;
+  gap: 6px;
+}
+
+.browser-panel__footer--compact span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.browser-panel__footer--compact button {
+  margin-left: auto;
+  padding: 1px 6px;
+}

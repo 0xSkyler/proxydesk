@@ -1,6 +1,6 @@
 import type { ProxyProtocol } from './proxy';
 
-export type GridLayout = '1x10' | '2x5' | '5x2';
+export type GridLayout = '1x10' | '2x5' | '5x2' | 'square';
 export type Theme = 'dark' | 'light' | 'system';
 export type ProxyRotationInterval = 'off' | '10m' | '30m' | '60m' | 'manual';
 
