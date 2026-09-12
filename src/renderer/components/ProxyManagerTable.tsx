@@ -5,7 +5,6 @@ import type { ProxyProtocol, ProxyStatus } from '../../shared/types/proxy';
 
 export function ProxyManagerTable(): JSX.Element {
   const proxies = useAppStore((s) => s.proxies);
-  const providerHealth = useAppStore((s) => s.providerHealth);
   const pushToast = useAppStore((s) => s.pushToast);
   const setProxies = useAppStore((s) => s.setProxies);
 
@@ -119,36 +118,12 @@ export function ProxyManagerTable(): JSX.Element {
           {filtered.length === 0 && (
             <tr>
               <td colSpan={8} className="muted">
-                No proxies available. Reload proxies or import your own to populate this list.
+                No proxies available. Use Import Proxies to add your own list.
               </td>
             </tr>
           )}
         </tbody>
       </table>
-
-      <div className="panel__section">
-        <h3>Provider Health</h3>
-        <table className="data-table">
-          <thead>
-            <tr>
-              <th>Provider</th>
-              <th>Last Run</th>
-              <th>Proxies Returned</th>
-              <th>Last Error</th>
-            </tr>
-          </thead>
-          <tbody>
-            {providerHealth.map((h) => (
-              <tr key={h.name}>
-                <td>{h.name}</td>
-                <td>{h.lastRunAt ? new Date(h.lastRunAt).toLocaleTimeString() : '—'}</td>
-                <td>{h.proxiesReturned}</td>
-                <td>{h.lastError ?? '—'}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
     </div>
   );
 }

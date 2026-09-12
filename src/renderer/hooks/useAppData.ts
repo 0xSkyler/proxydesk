@@ -12,24 +12,21 @@ export function useAppData(): void {
   const setProxies = useAppStore((s) => s.setProxies);
   const setSettings = useAppStore((s) => s.setSettings);
   const setReloadSummary = useAppStore((s) => s.setReloadSummary);
-  const setProviderHealth = useAppStore((s) => s.setProviderHealth);
   const setReloadProgress = useAppStore((s) => s.setReloadProgress);
 
   useEffect(() => {
     let cancelled = false;
 
     async function load() {
-      const [browsers, proxies, settings, health] = await Promise.all([
+      const [browsers, proxies, settings] = await Promise.all([
         window.app.browser.getAll(),
         window.app.proxy.getAll(),
-        window.app.settings.get(),
-        window.app.proxy.getProviderHealth()
+        window.app.settings.get()
       ]);
       if (cancelled) return;
       setBrowsers(browsers);
       setProxies(proxies);
       setSettings(settings);
-      setProviderHealth(health);
     }
 
     void load();
@@ -48,5 +45,5 @@ export function useAppData(): void {
       offProxy();
       offProgress();
     };
-  }, [setBrowsers, upsertBrowser, setProxies, setSettings, setReloadSummary, setProviderHealth, setReloadProgress]);
+  }, [setBrowsers, upsertBrowser, setProxies, setSettings, setReloadSummary, setReloadProgress]);
 }

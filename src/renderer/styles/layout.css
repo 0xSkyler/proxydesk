@@ -34,20 +34,27 @@
   display: grid;
   gap: 10px;
   padding: 10px;
-  /* Fixed to the viewport height, not a minimum — the whole point of the
-     grid is that all 10 browsers are visible at once with no scrolling.
-     A forced min-height (280px/row) used to make 5 rows taller than most
-     windows, which made this container scroll — and because the real
-     Chromium content is a native BrowserView positioned by absolute pixel
-     coordinates (see BrowserPanel's ResizeObserver reporting bounds to the
-     main process), it only re-measures on resize, not on scroll: scrolling
-     this box left each BrowserView visually "stuck" while the DOM around
-     it moved. Box-sizing so gap/padding don't push the grid past 100%. */
+  /* Each row gets a real, usable minimum height instead of being squeezed
+     to fill whatever space is left in the window — with 2 columns and 5
+     rows, stretching rows to fill 100% of the container's height (the old
+     `grid-auto-rows: 1fr` + `overflow: hidden`) left browser-panel__viewport
+     (where the actual page content renders) only a few pixels tall on a
+     typical window, which is why browsers looked "dead" even though they
+     were working fine. Rows now size to their content's natural height
+     (at least MIN_ROW_HEIGHT below) and the grid scrolls instead of
+     compressing further when there isn't room for every row at once.
+     This is safe to scroll: the real Chromium content is a native
+     BrowserView positioned by absolute screen coordinates reported by each
+     BrowserPanel, which re-measures on both resize AND scroll (capture-phase
+     listener — see BrowserPanel's reportBounds), so a scrolled tile's
+     content moves along with it instead of staying visually "stuck".
+     Box-sizing so gap/padding don't push the grid past 100%. */
   box-sizing: border-box;
   height: 100%;
   width: 100%;
-  grid-auto-rows: 1fr;
-  overflow: hidden;
+  grid-auto-rows: minmax(340px, auto);
+  align-content: start;
+  overflow-y: auto;
 }
 
 .browser-panel {

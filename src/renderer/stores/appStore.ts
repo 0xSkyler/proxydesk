@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import type { BrowserState } from '../../shared/types/browser';
-import type { ProxyProviderHealth, ProxyRecord, ReloadProgress, ReloadProxiesSummary } from '../../shared/types/proxy';
+import type { ProxyRecord, ReloadProgress, ReloadProxiesSummary } from '../../shared/types/proxy';
 import type { AppSettings } from '../../shared/types/settings';
 import { DEFAULT_SETTINGS } from '../../shared/types/settings';
 import { BROWSER_IDS } from '../../shared/types/browser';
@@ -10,7 +10,6 @@ export type ActivePanel = 'grid' | 'proxyManager' | 'assignments' | 'settings' |
 interface AppStoreState {
   browsers: Record<number, BrowserState>;
   proxies: ProxyRecord[];
-  providerHealth: ProxyProviderHealth[];
   settings: AppSettings;
   selectedCountry: string | null;
   activePanel: ActivePanel;
@@ -22,7 +21,6 @@ interface AppStoreState {
   setBrowsers(list: BrowserState[]): void;
   upsertBrowser(state: BrowserState): void;
   setProxies(list: ProxyRecord[]): void;
-  setProviderHealth(list: ProxyProviderHealth[]): void;
   setSettings(settings: AppSettings): void;
   setSelectedCountry(code: string | null): void;
   setActivePanel(panel: ActivePanel): void;
@@ -51,7 +49,6 @@ export const useAppStore = create<AppStoreState>((set) => ({
     ])
   ),
   proxies: [],
-  providerHealth: [],
   settings: DEFAULT_SETTINGS,
   selectedCountry: null,
   activePanel: 'grid',
@@ -63,7 +60,6 @@ export const useAppStore = create<AppStoreState>((set) => ({
   setBrowsers: (list) => set({ browsers: Object.fromEntries(list.map((b) => [b.id, b])) }),
   upsertBrowser: (state) => set((s) => ({ browsers: { ...s.browsers, [state.id]: state } })),
   setProxies: (list) => set({ proxies: list }),
-  setProviderHealth: (list) => set({ providerHealth: list }),
   setSettings: (settings) => set({ settings }),
   setSelectedCountry: (code) => set({ selectedCountry: code }),
   setActivePanel: (panel) => set({ activePanel: panel }),

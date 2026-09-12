@@ -1,11 +1,5 @@
 import type { BrowserState, BrowserBounds, BroadcastSearchResult } from './browser';
-import type {
-  ProxyRecord,
-  ProxyImportResult,
-  ProxyProviderHealth,
-  ReloadProgress,
-  ReloadProxiesSummary
-} from './proxy';
+import type { ProxyRecord, ProxyImportResult, ReloadProgress, ReloadProxiesSummary } from './proxy';
 import type { AppSettings } from './settings';
 
 /**
@@ -66,7 +60,6 @@ export interface AppApi {
     importText(text: string): Promise<ProxyImportResult>;
     importFile(filePath: string): Promise<ProxyImportResult>;
     exportProxies(format: 'txt' | 'csv' | 'json'): Promise<string>;
-    getProviderHealth(): Promise<ProxyProviderHealth[]>;
     onAssignmentsChanged(cb: (summary: ReloadProxiesSummary) => void): () => void;
     onReloadProgress(cb: (progress: ReloadProgress) => void): () => void;
   };
@@ -112,7 +105,6 @@ export const IPC_CHANNELS = {
   proxyImportText: 'proxy:importText',
   proxyImportFile: 'proxy:importFile',
   proxyExport: 'proxy:export',
-  proxyProviderHealth: 'proxy:providerHealth',
   proxyAssignmentsChanged: 'proxy:assignmentsChanged',
   proxyReloadProgress: 'proxy:reloadProgress',
 

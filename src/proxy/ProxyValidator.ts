@@ -76,8 +76,27 @@ export class ProxyValidator {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
+        clearTimeout(backstop);
         resolve(result);
       };
+
+      // Independent wall-clock backstop: `req.on('timeout', ...)` only
+      // fires on socket IDLE time (a proxy that trickles a byte every few
+      // seconds keeps resetting that clock and never triggers it, even
+      // though the whole request has long since blown past timeoutMs),
+      // and aborting via controller.abort() is only handled here through
+      // the 'error' event — if a given Node/Electron version instead
+      // emits 'abort' for that (no listener for it below), finish() would
+      // never run either way. Either gap leaves this promise unresolved
+      // forever, which hangs validateMany's Promise.all, which hangs the
+      // whole reload — exactly the class of bug already found and fixed
+      // in the provider fetch layer, just recurring here in validation.
+      // This backstop guarantees finish() always runs within a bounded
+      // time regardless of which request-level event does or doesn't fire.
+      const backstop = setTimeout(() => {
+        req.destroy();
+        finish({ proxyId: proxy.id, status: 'dead', error: 'Validation timed out', checkedAt });
+      }, timeoutMs + 1000);
 
       let target: URL;
       try {

@@ -58,41 +58,19 @@ export interface ReloadProgress {
   total: number;
 }
 
-export interface ProxyProviderHealth {
-  name: string;
-  lastRunAt?: string;
-  lastSuccessAt?: string;
-  lastError?: string;
-  proxiesReturned: number;
-  enabled: boolean;
-}
-
-export interface ProxyFetchOptions {
-  countryCode?: string;
-  signal?: AbortSignal;
-}
-
-export interface ProxyProvider {
-  readonly name: string;
-  readonly kind: 'public' | 'imported' | 'custom';
-  fetchProxies(options: ProxyFetchOptions): Promise<ProxyRecord[]>;
-}
-
 /** Assignment of a validated proxy (or none) to a numbered browser workspace. */
 export interface ProxyAssignment {
   browserId: number;
   proxy: ProxyRecord | null;
 }
 
+/** Result of (re-)validating every known (manually imported) proxy and
+ * assigning the healthy ones to browsers. There is no fetch/discovery step
+ * any more — proxies only enter the pool via Import Proxies — so this is
+ * purely a validate-and-assign summary. */
 export interface ReloadProxiesSummary {
   found: number;
   countryMatched: number;
   working: number;
   assignments: ProxyAssignment[];
-  providerErrors: Array<{ provider: string; reason: string }>;
-  /** How many public/aggregated-list candidates were excluded by
-   * maxCandidatesPerReload before validation even ran (a random sample,
-   * not a fixed cutoff — see ProxyManager.reload). 0 when nothing was
-   * skipped, e.g. validation is off or candidates fit within the cap. */
-  candidatesSkipped: number;
 }

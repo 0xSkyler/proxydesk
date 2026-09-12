@@ -80,7 +80,6 @@ export function registerIpc(deps: IpcDeps): void {
   ipcMain.handle(IPC_CHANNELS.proxyImportText, (_e, text: string) => proxyManager.importText(text));
   ipcMain.handle(IPC_CHANNELS.proxyImportFile, (_e, filePath: string) => proxyManager.importFile(filePath));
   ipcMain.handle(IPC_CHANNELS.proxyExport, (_e, format: 'txt' | 'csv' | 'json') => proxyManager.exportProxies(format));
-  ipcMain.handle(IPC_CHANNELS.proxyProviderHealth, () => proxyManager.getProviderHealth());
 
   ipcMain.handle(IPC_CHANNELS.settingsGet, () => settingsManager.get());
   ipcMain.handle(IPC_CHANNELS.settingsUpdate, (_e, partial) => settingsManager.update(partial));

@@ -1,23 +1,12 @@
 import { EventEmitter } from 'node:events';
 import { promises as fs } from 'node:fs';
-import type {
-  ProxyImportResult,
-  ProxyProvider,
-  ProxyProviderHealth,
-  ProxyRecord,
-  ReloadProgress,
-  ReloadProxiesSummary
-} from '../shared/types/proxy';
+import type { ProxyImportResult, ProxyRecord, ReloadProgress, ReloadProxiesSummary } from '../shared/types/proxy';
 import type { SettingsManager } from './SettingsManager';
 import type { StorageManager } from './StorageManager';
 import { dedupeProxies, parseBulkText } from '../proxy/ProxyParser';
 import { ProxyValidator } from '../proxy/ProxyValidator';
 import { scoreProxy } from '../proxy/ProxyScorer';
 import { assignProxies, filterByCountry } from '../proxy/ProxyAssigner';
-import { PublicProxyProvider } from '../proxy/providers/PublicProxyProvider';
-import { ScraperCheckerProvider } from '../proxy/providers/ScraperCheckerProvider';
-import { ImportedProxyProvider } from '../proxy/providers/ImportedProxyProvider';
-import { CustomProxyProvider } from '../proxy/providers/CustomProxyProvider';
 import { logger } from './Logger';
 
 const PROXIES_KEY = 'proxies';
@@ -37,7 +26,6 @@ export class ProxyManager extends EventEmitter {
   private allProxies = new Map<string, ProxyRecord>();
   private importedProxies: ProxyRecord[] = [];
   private assignments = new Map<number, ProxyRecord | null>();
-  private providerHealth = new Map<string, ProxyProviderHealth>();
   private currentReloadController: AbortController | null = null;
 
   constructor(
@@ -65,31 +53,8 @@ export class ProxyManager extends EventEmitter {
     logger.info('proxy', `ProxyManager initialized with ${this.allProxies.size} known proxies.`);
   }
 
-  private buildProviders(countryHint: string | null): ProxyProvider[] {
-    const providers: ProxyProvider[] = [];
-    const settings = this.settings.get();
-
-    if (settings.proxy.publicProvidersEnabled) {
-      providers.push(new PublicProxyProvider());
-    }
-    if (settings.proxy.aggregatedListsEnabled) {
-      providers.push(new ScraperCheckerProvider());
-    }
-    providers.push(new ImportedProxyProvider(() => this.importedProxies));
-    for (const custom of settings.customProviders) {
-      if (custom.enabled) providers.push(new CustomProxyProvider(custom));
-    }
-
-    void countryHint;
-    return providers;
-  }
-
   getAll(): ProxyRecord[] {
     return Array.from(this.allProxies.values()).map(stripSecretsForList);
-  }
-
-  getProviderHealth(): ProxyProviderHealth[] {
-    return Array.from(this.providerHealth.values());
   }
 
   getAssignment(browserId: number): ProxyRecord | null {
@@ -101,9 +66,11 @@ export class ProxyManager extends EventEmitter {
   }
 
   /**
-   * Full reload pipeline: fetch from every enabled provider (each isolated
-   * so one failure never blocks the others) -> dedupe -> filter by country
-   * -> validate (if enabled) -> rank -> assign to browserIds -> persist.
+   * Validate-and-assign pipeline over every proxy already known to the app
+   * (in practice: whatever was manually imported via Import Proxies, plus
+   * anything imported in a previous session) — filter by country -> validate
+   * (if enabled) -> rank -> assign to browserIds -> persist. There is no
+   * fetch/discovery step: proxies only ever enter the pool through import.
    */
   async reload(browserIds: number[], countryCode: string | null): Promise<ReloadProxiesSummary> {
     this.currentReloadController?.abort();
@@ -111,83 +78,13 @@ export class ProxyManager extends EventEmitter {
     this.currentReloadController = controller;
 
     const settings = this.settings.get();
-    const providers = this.buildProviders(countryCode);
-    const providerErrors: Array<{ provider: string; reason: string }> = [];
-    const fetched: ProxyRecord[] = [];
 
-    await Promise.all(
-      providers.map(async (provider) => {
-        const health: ProxyProviderHealth = this.providerHealth.get(provider.name) ?? {
-          name: provider.name,
-          proxiesReturned: 0,
-          enabled: true
-        };
-        try {
-          // Belt-and-suspenders: providers are expected to honor `signal`
-          // and their own internal per-request timeouts, but a single
-          // provider that hangs for any reason (a bug, a source whose
-          // response stalls mid-body in a way its own timeout didn't
-          // catch) would otherwise block this whole Promise.all forever —
-          // which blocks everything downstream, including assigning
-          // proxies that have nothing to do with the stuck provider, like
-          // imported ones. This hard outer deadline guarantees reload()
-          // always finishes within a bounded time no matter what any one
-          // provider does.
-          const result = await withTimeout(
-            provider.fetchProxies({ countryCode: countryCode ?? undefined, signal: controller.signal }),
-            PROVIDER_FETCH_TIMEOUT_MS,
-            `Provider "${provider.name}" timed out after ${PROVIDER_FETCH_TIMEOUT_MS}ms`
-          );
-          fetched.push(...result);
-          health.lastRunAt = new Date().toISOString();
-          health.lastSuccessAt = health.lastRunAt;
-          health.lastError = undefined;
-          health.proxiesReturned = result.length;
-          logger.info('proxy', `Provider "${provider.name}" returned ${result.length} proxies.`);
-        } catch (err) {
-          const reason = err instanceof Error ? err.message : String(err);
-          providerErrors.push({ provider: provider.name, reason });
-          health.lastRunAt = new Date().toISOString();
-          health.lastError = reason;
-          logger.warn('proxy', `Provider "${provider.name}" failed: ${reason}. Continuing with remaining providers.`);
-        }
-        this.providerHealth.set(provider.name, health);
-      })
-    );
+    const known = dedupeProxies(Array.from(this.allProxies.values()));
+    for (const p of known) this.allProxies.set(p.id, p);
 
-    if (controller.signal.aborted) {
-      throw new Error('Proxy reload superseded by a newer request.');
-    }
-
-    // Merge freshly-fetched proxies with everything already known (so
-    // previously-validated proxies aren't thrown away every reload), then dedupe.
-    const merged = dedupeProxies([...Array.from(this.allProxies.values()), ...fetched]);
-    for (const p of merged) this.allProxies.set(p.id, p);
-
-    const found = merged.length;
-    const countryMatched = filterByCountry(merged, countryCode).length;
-    let candidates = filterByCountry(merged, countryCode);
-
-    // Cap how many candidates go into validation. Imported proxies and
-    // your own custom/API providers are exempt — only public/aggregated
-    // results are capped, since those are the ones that can arrive in the
-    // thousands (the aggregated-lists provider alone spans ~70 sources)
-    // and would otherwise queue validation for tens of minutes at
-    // maxConcurrentChecks concurrency. A random sample is taken each
-    // reload rather than always the first N, so which proxies actually
-    // get checked varies run to run instead of favoring whichever source
-    // happened to list itself first.
-    let candidatesSkipped = 0;
-    const trustedSourceNames = new Set(['Imported', ...settings.customProviders.map((p) => p.name)]);
-    const isTrusted = (p: ProxyRecord) => p.sources.some((s) => trustedSourceNames.has(s));
-    const trusted = candidates.filter(isTrusted);
-    const bulk = candidates.filter((c) => !isTrusted(c));
-    const bulkBudget = Math.max(0, settings.proxy.maxCandidatesPerReload - trusted.length);
-    if (bulk.length > bulkBudget) {
-      const sampled = shuffle(bulk).slice(0, bulkBudget);
-      candidatesSkipped = bulk.length - sampled.length;
-      candidates = [...trusted, ...sampled];
-    }
+    const found = known.length;
+    const countryMatched = filterByCountry(known, countryCode).length;
+    let candidates = filterByCountry(known, countryCode);
 
     if (settings.proxy.validationEnabled && candidates.length > 0) {
       this.emit('reloadProgress', { checked: 0, total: candidates.length });
@@ -234,9 +131,7 @@ export class ProxyManager extends EventEmitter {
       found,
       countryMatched,
       working,
-      assignments,
-      providerErrors,
-      candidatesSkipped
+      assignments
     };
     this.emit('assignmentsChanged', summary);
     return summary;
@@ -393,38 +288,3 @@ function stripSecretsForList(proxy: ProxyRecord): ProxyRecord {
   return { ...proxy, password: '••••••••' };
 }
 
-/** Hard ceiling on how long ProxyManager.reload() will wait for any single
- * provider's fetchProxies() to settle, regardless of what that provider
- * does internally. ScraperCheckerProvider alone can take up to roughly
- * (source count / concurrency) * per-fetch timeout in the worst case
- * (~90 sources / 12 concurrent * 10s ≈ 75s), so this is set comfortably
- * above that rather than the per-fetch timeout itself. */
-const PROVIDER_FETCH_TIMEOUT_MS = 90000;
-
-/** Exported for unit testing — see tests/withTimeout.test.ts. */
-export function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error(message)), ms);
-    promise.then(
-      (value) => {
-        clearTimeout(timer);
-        resolve(value);
-      },
-      (err) => {
-        clearTimeout(timer);
-        reject(err);
-      }
-    );
-  });
-}
-
-/** Fisher-Yates shuffle, used to take a fair random sample of candidates
- * when maxCandidatesPerReload trims the bulk (public/aggregated) pool. */
-function shuffle<T>(items: T[]): T[] {
-  const copy = [...items];
-  for (let i = copy.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [copy[i], copy[j]] = [copy[j], copy[i]];
-  }
-  return copy;
-}

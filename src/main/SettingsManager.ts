@@ -51,7 +51,6 @@ function mergeSettings(base: AppSettings, partial: Partial<AppSettings>): AppSet
     browser: { ...base.browser, ...partial.browser },
     proxy: { ...base.proxy, ...partial.proxy },
     performance: { ...base.performance, ...partial.performance },
-    application: { ...base.application, ...partial.application },
-    customProviders: partial.customProviders ?? base.customProviders
+    application: { ...base.application, ...partial.application }
   };
 }

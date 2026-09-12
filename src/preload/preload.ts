@@ -51,7 +51,6 @@ const IPC_CHANNELS = {
   proxyImportText: 'proxy:importText',
   proxyImportFile: 'proxy:importFile',
   proxyExport: 'proxy:export',
-  proxyProviderHealth: 'proxy:providerHealth',
   proxyAssignmentsChanged: 'proxy:assignmentsChanged',
   proxyReloadProgress: 'proxy:reloadProgress',
 
@@ -100,7 +99,6 @@ const api: AppApi = {
     importText: (text) => ipcRenderer.invoke(IPC_CHANNELS.proxyImportText, text),
     importFile: (filePath) => ipcRenderer.invoke(IPC_CHANNELS.proxyImportFile, filePath),
     exportProxies: (format) => ipcRenderer.invoke(IPC_CHANNELS.proxyExport, format),
-    getProviderHealth: () => ipcRenderer.invoke(IPC_CHANNELS.proxyProviderHealth),
     onAssignmentsChanged: (cb) => {
       const listener = (_e: Electron.IpcRendererEvent, summary: Parameters<typeof cb>[0]) => cb(summary);
       ipcRenderer.on(IPC_CHANNELS.proxyAssignmentsChanged, listener);

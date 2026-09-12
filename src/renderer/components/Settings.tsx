@@ -1,17 +1,10 @@
-import { useState } from 'react';
 import { useAppStore } from '../stores/appStore';
-import type { AppSettings, CustomProviderConfig, GridLayout, Theme } from '../../shared/types/settings';
+import type { AppSettings, GridLayout, Theme } from '../../shared/types/settings';
 
 export function Settings(): JSX.Element {
   const settings = useAppStore((s) => s.settings);
   const setSettings = useAppStore((s) => s.setSettings);
   const pushToast = useAppStore((s) => s.pushToast);
-  const [newProvider, setNewProvider] = useState<Partial<CustomProviderConfig>>({
-    method: 'GET',
-    headers: {},
-    responseArrayPath: 'proxies',
-    enabled: true
-  });
 
   async function apply(partial: Partial<AppSettings>) {
     const updated = await window.app.settings.update(partial);
@@ -22,29 +15,6 @@ export function Settings(): JSX.Element {
     const updated = await window.app.settings.reset();
     setSettings(updated);
     pushToast('Settings reset to defaults.', 'info');
-  }
-
-  function addCustomProvider() {
-    if (!newProvider.name || !newProvider.apiUrl) {
-      pushToast('Provider name and API URL are required.', 'error');
-      return;
-    }
-    const provider: CustomProviderConfig = {
-      id: `custom-${Date.now()}`,
-      name: newProvider.name,
-      apiUrl: newProvider.apiUrl,
-      method: newProvider.method === 'POST' ? 'POST' : 'GET',
-      headers: newProvider.headers ?? {},
-      countryParam: newProvider.countryParam,
-      responseArrayPath: newProvider.responseArrayPath ?? 'proxies',
-      enabled: true
-    };
-    void apply({ customProviders: [...settings.customProviders, provider] });
-    setNewProvider({ method: 'GET', headers: {}, responseArrayPath: 'proxies', enabled: true });
-  }
-
-  function removeCustomProvider(id: string) {
-    void apply({ customProviders: settings.customProviders.filter((p) => p.id !== id) });
   }
 
   return (
@@ -173,23 +143,6 @@ export function Settings(): JSX.Element {
           />
         </label>
         <label>
-          Max candidates validated per reload
-          <input
-            type="number"
-            min={0}
-            max={5000}
-            value={settings.proxy.maxCandidatesPerReload}
-            onChange={(e) =>
-              void apply({ proxy: { ...settings.proxy, maxCandidatesPerReload: Number(e.target.value) } })
-            }
-          />
-        </label>
-        <p className="muted" style={{ marginTop: -6, marginBottom: 0 }}>
-          Caps how many public/aggregated-list proxies get checked per reload (a random sample, not always the same
-          ones) so a large source list doesn&rsquo;t turn one reload into a multi-hour validation queue. Imported and
-          custom-provider proxies are never capped.
-        </p>
-        <label>
           IP check URL
           <input
             value={settings.proxy.ipCheckUrl}
@@ -213,63 +166,6 @@ export function Settings(): JSX.Element {
             <option value="manual">Manual only</option>
           </select>
         </label>
-      </section>
-
-      <section>
-        <h3>Proxy Providers</h3>
-        <label className="checkbox-label">
-          <input
-            type="checkbox"
-            checked={settings.proxy.publicProvidersEnabled}
-            onChange={(e) => void apply({ proxy: { ...settings.proxy, publicProvidersEnabled: e.target.checked } })}
-          />
-          Enable public proxy providers
-        </label>
-        <label className="checkbox-label">
-          <input
-            type="checkbox"
-            checked={settings.proxy.aggregatedListsEnabled}
-            onChange={(e) => void apply({ proxy: { ...settings.proxy, aggregatedListsEnabled: e.target.checked } })}
-          />
-          Enable aggregated public lists (~70 sources, no country filtering)
-        </label>
-
-        <h4>Custom / API Providers</h4>
-        <ul className="provider-list">
-          {settings.customProviders.map((p) => (
-            <li key={p.id}>
-              <strong>{p.name}</strong> — {p.apiUrl}
-              <button onClick={() => removeCustomProvider(p.id)}>Remove</button>
-            </li>
-          ))}
-        </ul>
-        <div className="provider-form">
-          <input
-            placeholder="Provider name"
-            value={newProvider.name ?? ''}
-            onChange={(e) => setNewProvider((p) => ({ ...p, name: e.target.value }))}
-          />
-          <input
-            placeholder="API URL"
-            value={newProvider.apiUrl ?? ''}
-            onChange={(e) => setNewProvider((p) => ({ ...p, apiUrl: e.target.value }))}
-          />
-          <input
-            placeholder="Country query param (optional)"
-            value={newProvider.countryParam ?? ''}
-            onChange={(e) => setNewProvider((p) => ({ ...p, countryParam: e.target.value }))}
-          />
-          <input
-            placeholder="Response array path (e.g. data.proxies)"
-            value={newProvider.responseArrayPath ?? ''}
-            onChange={(e) => setNewProvider((p) => ({ ...p, responseArrayPath: e.target.value }))}
-          />
-          <button onClick={addCustomProvider}>Add Provider</button>
-        </div>
-        <p className="muted">
-          API keys for custom providers should be supplied via request headers configured here, sourced from your own
-          secure storage — never commit credentials into source control (see .env.example).
-        </p>
       </section>
 
       <section>

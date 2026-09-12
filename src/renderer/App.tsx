@@ -40,21 +40,20 @@ function StatusBar(): JSX.Element {
   }, []);
 
   const summary = useAppStore((s) => s.lastReloadSummary);
-  const providerHealth = useAppStore((s) => s.providerHealth);
-  const anyProviderDown = providerHealth.some((h) => h.lastError);
+  const proxies = useAppStore((s) => s.proxies);
 
   return (
     <footer className="status-bar">
       <span>RAM: {memory ? `${memory.rssMb} MB` : '—'}</span>
       <span>
         {summary
-          ? `Last reload: ${summary.working}/${summary.found} working, ${
+          ? `Last assign: ${summary.working}/${summary.found} working, ${
               summary.assignments.filter((a) => a.proxy).length
             }/${summary.assignments.length} assigned`
-          : 'No proxy reload yet'}
+          : 'No proxies assigned yet'}
       </span>
-      <span className={anyProviderDown ? 'status-bad' : 'status-ok'}>
-        {anyProviderDown ? 'One or more providers reporting errors' : 'All providers healthy'}
+      <span className={proxies.length === 0 ? 'status-bad' : 'status-ok'}>
+        {proxies.length === 0 ? 'No proxies imported yet' : `${proxies.length} proxies in pool`}
       </span>
     </footer>
   );
@@ -88,8 +87,7 @@ export default function App(): JSX.Element {
         <p>Initializing…</p>
         <ul>
           <li>✓ Configuration</li>
-          <li>✓ Proxy providers</li>
-          <li>✓ Proxy discovery</li>
+          <li>✓ Imported proxies</li>
           <li>✓ Browser sessions</li>
         </ul>
       </div>
