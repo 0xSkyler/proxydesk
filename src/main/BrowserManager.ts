@@ -72,6 +72,7 @@ export class BrowserManager extends EventEmitter {
   private window: BrowserWindow | null = null;
   private activeId: number | null = null;
   private globalLoginHandlerInstalled = false;
+  private keepAliveTimer: NodeJS.Timeout | null = null;
 
   attachWindow(window: BrowserWindow): void {
     this.window = window;
@@ -181,6 +182,31 @@ export class BrowserManager extends EventEmitter {
       logger.error('browser', `Browser ${id} renderer process gone: ${details.reason}`);
       this.updateState(managed, { connectionStatus: 'crashed', crashCount: managed.state.crashCount + 1 });
       void this.handleCrash(managed, options);
+    });
+
+    // Never let a link, target="_blank", or window.open() spawn a real new
+    // OS-level window. A window created that way would NOT be one of our
+    // managed BrowserViews — it would have no assigned proxy, no session
+    // isolation, and no entry in this app's UI at all, making it both
+    // untraceable from here and a proxy/anonymity leak (traffic from it
+    // goes out directly, not through this browser's proxy). Instead, open
+    // the link in this same browser/session. `did-create-window` is a
+    // defensive backstop in case some other path still manages to create
+    // one despite the deny below.
+    wc.setWindowOpenHandler(({ url }) => {
+      logger.info('browser', `Browser ${id}: opening "${url}" in place instead of a new window.`);
+      void wc.loadURL(url).catch((err) => {
+        logger.warn('browser', `Browser ${id} failed to open in-place link ${url}: ${(err as Error).message}`);
+      });
+      return { action: 'deny' };
+    });
+    wc.on('did-create-window', (win) => {
+      logger.warn('browser', `Browser ${id}: a new window was created despite the deny handler — closing it.`);
+      try {
+        win.close();
+      } catch {
+        // Already gone — nothing to do.
+      }
     });
   }
 
@@ -414,6 +440,38 @@ export class BrowserManager extends EventEmitter {
 
   copyToClipboard(text: string): void {
     clipboard.writeText(text);
+  }
+
+  /**
+   * Periodically nudges every managed browser with a tiny, visually
+   * imperceptible scroll-and-back so sites see real DOM activity and don't
+   * treat the tab as idle — this is what keeps a logged-in session (search
+   * results, a shopping cart, a form in progress) from timing out while
+   * you're away from the app and not actually interacting with anything.
+   * Safe to call repeatedly with new settings — it always clears any
+   * previous timer first, so re-configuring (interval change, or turning it
+   * off) never stacks multiple timers.
+   */
+  setKeepAlive(enabled: boolean, intervalMs: number): void {
+    if (this.keepAliveTimer) {
+      clearInterval(this.keepAliveTimer);
+      this.keepAliveTimer = null;
+    }
+    if (!enabled) return;
+
+    this.keepAliveTimer = setInterval(() => {
+      for (const managed of this.browsers.values()) {
+        const wc = managed.view.webContents;
+        if (wc.isDestroyed()) continue;
+        // A 1px scroll down then back up is enough to register as user
+        // activity to most idle-timeout detection without changing
+        // anything the person would notice or scrolling past content.
+        wc.executeJavaScript('window.scrollBy(0, 1); window.scrollBy(0, -1);', true).catch(() => {
+          // Page not ready, no scrollable content, or a cross-origin/CSP
+          // quirk — never worth surfacing as an error for a background nudge.
+        });
+      }
+    }, intervalMs);
   }
 }
 

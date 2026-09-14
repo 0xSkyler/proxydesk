@@ -1,4 +1,5 @@
 import type { ProxyRecord } from './proxy';
+import { MAX_BROWSER_COUNT } from '../constants';
 
 export type BrowserConnectionStatus =
   | 'idle'
@@ -49,6 +50,13 @@ export interface BroadcastSearchResult {
   ranAt: string;
 }
 
-export const BROWSER_COUNT = 10;
+/** @deprecated kept only so nothing importing the old name breaks; the real
+ * ceiling is MAX_BROWSER_COUNT (see shared/constants) and browser count is
+ * now a user setting, not a fixed constant. */
+export const BROWSER_COUNT = MAX_BROWSER_COUNT;
 
-export const BROWSER_IDS: number[] = Array.from({ length: BROWSER_COUNT }, (_, i) => i + 1);
+/** Every possible browser id, up to the maximum configurable count. Actual
+ * rendering/creation always slices this down to `settings.browser.browserCount`
+ * (see BrowserGrid.tsx and main.ts's getBrowserIds) — this array itself is
+ * just the full id space, not "how many browsers exist right now". */
+export const BROWSER_IDS: number[] = Array.from({ length: MAX_BROWSER_COUNT }, (_, i) => i + 1);

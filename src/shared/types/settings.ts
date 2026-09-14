@@ -1,16 +1,30 @@
 import type { ProxyProtocol } from './proxy';
 
-export type GridLayout = '1x10' | '2x5' | '5x2' | 'square';
 export type Theme = 'dark' | 'light' | 'system';
 export type ProxyRotationInterval = 'off' | '10m' | '30m' | '60m' | 'manual';
 
 export interface BrowserSettings {
   browserCount: number;
-  gridLayout: GridLayout;
+  /** Exact number of grid columns when gridSquareTiles is off — rows are
+   * always just ceil(browserCount / gridColumns), so "2x3" is browserCount
+   * 6 + gridColumns 2, "2x10" is browserCount 20 + gridColumns 2, etc. */
+  gridColumns: number;
+  /** When true, ignores gridColumns and instead lays out small, equal-sized
+   * square tiles (mobile-icon-like) that auto-fill the available width. */
+  gridSquareTiles: boolean;
+  /** Minimum height (px) of each browser tile — the "screen size" of an
+   * individual workspace in the grid. Higher = fewer tiles fit per row
+   * before wrapping/scrolling; lower = more fit, but each is smaller. */
+  tileMinHeight: number;
   persistSessions: boolean;
   startPage: string;
   userAgent: string;
   hardwareAcceleration: boolean;
+  /** Periodically nudges every browser (a tiny, invisible scroll-and-back)
+   * so sites don't treat the tab as idle and log the session out while
+   * you're away from the app. */
+  keepAliveEnabled: boolean;
+  keepAliveIntervalSec: number;
 }
 
 export interface ProxySettings {
@@ -37,6 +51,10 @@ export interface ApplicationSettings {
   startWithWindows: boolean;
   theme: Theme;
   notificationsEnabled: boolean;
+  /** Main window size in pixels, applied when the window is created
+   * (restart required to take effect on an already-open window). */
+  windowWidth: number;
+  windowHeight: number;
 }
 
 export interface AppSettings {
@@ -49,11 +67,15 @@ export interface AppSettings {
 export const DEFAULT_SETTINGS: AppSettings = {
   browser: {
     browserCount: 10,
-    gridLayout: '2x5',
+    gridColumns: 2,
+    gridSquareTiles: false,
+    tileMinHeight: 340,
     persistSessions: true,
     startPage: 'https://example.com',
     userAgent: '',
-    hardwareAcceleration: true
+    hardwareAcceleration: true,
+    keepAliveEnabled: false,
+    keepAliveIntervalSec: 60
   },
   proxy: {
     autoLoadOnStartup: true,
@@ -76,6 +98,8 @@ export const DEFAULT_SETTINGS: AppSettings = {
     startMinimized: false,
     startWithWindows: false,
     theme: 'dark',
-    notificationsEnabled: true
+    notificationsEnabled: true,
+    windowWidth: 1600,
+    windowHeight: 1000
   }
 };

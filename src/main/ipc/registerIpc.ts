@@ -61,9 +61,19 @@ export function registerIpc(deps: IpcDeps): void {
     return Promise.all(targets.map((id) => browserManager.broadcastSearch(id, query, matchText)));
   });
 
-  ipcMain.handle(IPC_CHANNELS.proxyReload, (_e, countryCode: string | null) =>
-    proxyManager.reload(getBrowserIds(), countryCode)
-  );
+  ipcMain.handle(IPC_CHANNELS.proxyReload, async (_e, countryCode: string | null) => {
+    const summary = await proxyManager.reload(getBrowserIds(), countryCode);
+    // reload() only updates ProxyManager's own bookkeeping — it does not
+    // touch each browser's actual Electron session. Without this loop, the
+    // UI would show a proxy assigned while that browser's real network
+    // traffic kept using whatever it had before (or none at all), which is
+    // exactly the gap that made the "Assign Proxies" button not visibly do
+    // anything to the browsers themselves.
+    for (const assignment of summary.assignments) {
+      await browserManager.assignProxy(assignment.browserId, assignment.proxy);
+    }
+    return summary;
+  });
   ipcMain.handle(IPC_CHANNELS.proxyGetAll, () => proxyManager.getAll());
   ipcMain.handle(IPC_CHANNELS.proxyAssign, async (_e, browserId: number, proxyId: string | null) => {
     await proxyManager.assign(browserId, proxyId);

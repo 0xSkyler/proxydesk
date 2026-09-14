@@ -1,5 +1,6 @@
 import { useAppStore } from '../stores/appStore';
-import type { AppSettings, GridLayout, Theme } from '../../shared/types/settings';
+import type { AppSettings, Theme } from '../../shared/types/settings';
+import { MAX_BROWSER_COUNT } from '../../shared/constants';
 
 export function Settings(): JSX.Element {
   const settings = useAppStore((s) => s.settings);
@@ -31,24 +32,50 @@ export function Settings(): JSX.Element {
           <input
             type="number"
             min={1}
-            max={10}
+            max={MAX_BROWSER_COUNT}
             value={settings.browser.browserCount}
             onChange={(e) =>
               void apply({ browser: { ...settings.browser, browserCount: Number(e.target.value) } })
             }
           />
         </label>
+        <p className="muted" style={{ marginTop: -6, marginBottom: 0 }}>
+          Each browser is a real, separate Chromium session — running many at once is genuinely RAM/CPU heavy.
+          Up to {MAX_BROWSER_COUNT} is allowed; scale up gradually and watch RAM in the status bar.
+        </p>
+        <label className="checkbox-label">
+          <input
+            type="checkbox"
+            checked={settings.browser.gridSquareTiles}
+            onChange={(e) => void apply({ browser: { ...settings.browser, gridSquareTiles: e.target.checked } })}
+          />
+          Square tiles (mobile-like) instead of a fixed column count
+        </label>
+        {!settings.browser.gridSquareTiles && (
+          <label>
+            Grid columns
+            <input
+              type="number"
+              min={1}
+              max={10}
+              value={settings.browser.gridColumns}
+              onChange={(e) => void apply({ browser: { ...settings.browser, gridColumns: Number(e.target.value) } })}
+            />
+          </label>
+        )}
+        <p className="muted" style={{ marginTop: -6, marginBottom: 0 }}>
+          Rows follow automatically from Number of browsers ÷ Grid columns — e.g. 6 browsers with 2 columns is a
+          2x3 grid, 20 browsers with 2 columns is 2x10. The grid scrolls if it doesn&rsquo;t all fit on screen.
+        </p>
         <label>
-          Browser grid
-          <select
-            value={settings.browser.gridLayout}
-            onChange={(e) => void apply({ browser: { ...settings.browser, gridLayout: e.target.value as GridLayout } })}
-          >
-            <option value="1x10">1 column</option>
-            <option value="2x5">2 columns</option>
-            <option value="5x2">5 columns</option>
-            <option value="square">Square tiles (mobile-like)</option>
-          </select>
+          Tile size (min height, px)
+          <input
+            type="number"
+            min={80}
+            max={900}
+            value={settings.browser.tileMinHeight}
+            onChange={(e) => void apply({ browser: { ...settings.browser, tileMinHeight: Number(e.target.value) } })}
+          />
         </label>
         <label className="checkbox-label">
           <input
@@ -82,6 +109,28 @@ export function Settings(): JSX.Element {
           />
           Hardware acceleration (restart required)
         </label>
+        <label className="checkbox-label">
+          <input
+            type="checkbox"
+            checked={settings.browser.keepAliveEnabled}
+            onChange={(e) => void apply({ browser: { ...settings.browser, keepAliveEnabled: e.target.checked } })}
+          />
+          Keep sessions alive while away (tiny periodic auto-scroll so sites don&rsquo;t treat the tab as idle)
+        </label>
+        {settings.browser.keepAliveEnabled && (
+          <label>
+            Keep-alive interval (seconds)
+            <input
+              type="number"
+              min={10}
+              max={3600}
+              value={settings.browser.keepAliveIntervalSec}
+              onChange={(e) =>
+                void apply({ browser: { ...settings.browser, keepAliveIntervalSec: Number(e.target.value) } })
+              }
+            />
+          </label>
+        )}
       </section>
 
       <section>
@@ -246,6 +295,30 @@ export function Settings(): JSX.Element {
             }
           />
           Notifications
+        </label>
+        <label>
+          Window width (px, restart required)
+          <input
+            type="number"
+            min={800}
+            max={7680}
+            value={settings.application.windowWidth}
+            onChange={(e) =>
+              void apply({ application: { ...settings.application, windowWidth: Number(e.target.value) } })
+            }
+          />
+        </label>
+        <label>
+          Window height (px, restart required)
+          <input
+            type="number"
+            min={600}
+            max={4320}
+            value={settings.application.windowHeight}
+            onChange={(e) =>
+              void apply({ application: { ...settings.application, windowHeight: Number(e.target.value) } })
+            }
+          />
         </label>
         <button onClick={() => void window.app.system.openLogsFolder()}>Open Logs Folder</button>
       </section>
