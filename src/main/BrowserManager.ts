@@ -477,13 +477,21 @@ export class BrowserManager extends EventEmitter {
 
 /**
  * Scrolls the page all the way to the bottom and back to the top, twice
- * (down, up, down, up), pausing briefly at each end so the motion — and the
- * scroll events it fires — look like a real, sustained visit rather than a
- * single flicked wheel-tick. Runs as an async IIFE so `executeJavaScript`'s
- * returned promise resolves only once the whole sequence finishes.
+ * (down, up, down, up), pausing at each end so the motion — and the scroll
+ * events it fires — look like a real, sustained visit rather than a single
+ * flicked wheel-tick. The browser's native `behavior: 'smooth'` scroll is
+ * too quick to read as a slow, deliberate scroll (it runs at a roughly
+ * fixed pixel speed with no way to configure it), so this animates the
+ * scroll itself frame-by-frame over a fixed duration instead, which is what
+ * actually lets the speed be tuned via SCROLL_DURATION_MS/PAUSE_MS below.
+ * Runs as an async IIFE so `executeJavaScript`'s returned promise resolves
+ * only once the whole sequence finishes.
  */
 const KEEP_ALIVE_SCROLL_SCRIPT = `
 (async () => {
+  const SCROLL_DURATION_MS = 3500; // time to travel from top to bottom (or back) — raise to scroll slower
+  const PAUSE_MS = 900; // pause at each end before reversing direction
+
   const scrollEl = document.scrollingElement || document.documentElement;
   const maxScroll = Math.max(0, scrollEl.scrollHeight - window.innerHeight);
   if (maxScroll <= 0) {
@@ -493,12 +501,37 @@ const KEEP_ALIVE_SCROLL_SCRIPT = `
     window.scrollBy(0, -1);
     return;
   }
+
   const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  // Animates the scroll position to \`target\` over \`duration\` ms with a
+  // gentle ease-in-out, rather than jumping/native-smooth-scrolling there —
+  // this is the actual knob that controls how slow the motion looks.
+  const animateScrollTo = (target, duration) =>
+    new Promise((resolve) => {
+      const startY = window.scrollY;
+      const delta = target - startY;
+      if (delta === 0) {
+        resolve();
+        return;
+      }
+      const startTime = performance.now();
+      function step(now) {
+        const elapsed = now - startTime;
+        const t = Math.min(1, elapsed / duration);
+        const eased = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+        window.scrollTo(0, startY + delta * eased);
+        if (t < 1) requestAnimationFrame(step);
+        else resolve();
+      }
+      requestAnimationFrame(step);
+    });
+
   for (let cycle = 0; cycle < 2; cycle++) {
-    window.scrollTo({ top: maxScroll, behavior: 'smooth' });
-    await wait(400);
-    window.scrollTo({ top: 0, behavior: 'smooth' });
-    await wait(400);
+    await animateScrollTo(maxScroll, SCROLL_DURATION_MS);
+    await wait(PAUSE_MS);
+    await animateScrollTo(0, SCROLL_DURATION_MS);
+    await wait(PAUSE_MS);
   }
 })();
 `;
