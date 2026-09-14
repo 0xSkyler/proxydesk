@@ -443,14 +443,16 @@ export class BrowserManager extends EventEmitter {
   }
 
   /**
-   * Periodically nudges every managed browser with a tiny, visually
-   * imperceptible scroll-and-back so sites see real DOM activity and don't
-   * treat the tab as idle — this is what keeps a logged-in session (search
-   * results, a shopping cart, a form in progress) from timing out while
-   * you're away from the app and not actually interacting with anything.
-   * Safe to call repeatedly with new settings — it always clears any
-   * previous timer first, so re-configuring (interval change, or turning it
-   * off) never stacks multiple timers.
+   * Periodically nudges every managed browser with a full page scroll (down
+   * to the bottom, back to the top, twice over) so sites see real, sustained
+   * scroll/DOM activity and don't treat the tab as idle — this is what keeps
+   * a logged-in session (search results, a shopping cart, a form in
+   * progress) from timing out while you're away from the app and not
+   * actually interacting with anything. A 1px nudge was too small for some
+   * sites' idle detectors to register as real activity, so this walks the
+   * whole scrollable height instead. Safe to call repeatedly with new
+   * settings — it always clears any previous timer first, so re-configuring
+   * (interval change, or turning it off) never stacks multiple timers.
    */
   setKeepAlive(enabled: boolean, intervalMs: number): void {
     if (this.keepAliveTimer) {
@@ -463,10 +465,7 @@ export class BrowserManager extends EventEmitter {
       for (const managed of this.browsers.values()) {
         const wc = managed.view.webContents;
         if (wc.isDestroyed()) continue;
-        // A 1px scroll down then back up is enough to register as user
-        // activity to most idle-timeout detection without changing
-        // anything the person would notice or scrolling past content.
-        wc.executeJavaScript('window.scrollBy(0, 1); window.scrollBy(0, -1);', true).catch(() => {
+        wc.executeJavaScript(KEEP_ALIVE_SCROLL_SCRIPT, true).catch(() => {
           // Page not ready, no scrollable content, or a cross-origin/CSP
           // quirk — never worth surfacing as an error for a background nudge.
         });
@@ -474,6 +473,34 @@ export class BrowserManager extends EventEmitter {
     }, intervalMs);
   }
 }
+
+/**
+ * Scrolls the page all the way to the bottom and back to the top, twice
+ * (down, up, down, up), pausing briefly at each end so the motion — and the
+ * scroll events it fires — look like a real, sustained visit rather than a
+ * single flicked wheel-tick. Runs as an async IIFE so `executeJavaScript`'s
+ * returned promise resolves only once the whole sequence finishes.
+ */
+const KEEP_ALIVE_SCROLL_SCRIPT = `
+(async () => {
+  const scrollEl = document.scrollingElement || document.documentElement;
+  const maxScroll = Math.max(0, scrollEl.scrollHeight - window.innerHeight);
+  if (maxScroll <= 0) {
+    // Nothing to scroll (short page) — still nudge with a tiny scroll so
+    // there is at least some activity for the idle detector to see.
+    window.scrollBy(0, 1);
+    window.scrollBy(0, -1);
+    return;
+  }
+  const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  for (let cycle = 0; cycle < 2; cycle++) {
+    window.scrollTo({ top: maxScroll, behavior: 'smooth' });
+    await wait(400);
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+    await wait(400);
+  }
+})();
+`;
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
