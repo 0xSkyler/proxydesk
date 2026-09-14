@@ -5,6 +5,7 @@ import type { SettingsManager } from './SettingsManager';
 import type { StorageManager } from './StorageManager';
 import { dedupeProxies, parseBulkText } from '../proxy/ProxyParser';
 import { ProxyValidator } from '../proxy/ProxyValidator';
+import { checkGoogleTrust, checkGoogleTrustMany } from '../proxy/GoogleTrustChecker';
 import { scoreProxy } from '../proxy/ProxyScorer';
 import { assignProxies, filterByCountry } from '../proxy/ProxyAssigner';
 import { logger } from './Logger';
@@ -37,9 +38,11 @@ export class ProxyManager extends EventEmitter {
 
   async init(): Promise<void> {
     const storedProxies = await this.storage.read<ProxyRecord[]>(PROXIES_KEY, []);
-    for (const p of storedProxies) this.allProxies.set(p.id, this.decryptCredentials(p));
+    for (const p of storedProxies) this.allProxies.set(p.id, this.normalizeLoaded(this.decryptCredentials(p)));
 
-    this.importedProxies = await this.storage.read<ProxyRecord[]>(IMPORTED_KEY, []);
+    this.importedProxies = (await this.storage.read<ProxyRecord[]>(IMPORTED_KEY, [])).map((p) =>
+      this.normalizeLoaded(p)
+    );
     for (const p of this.importedProxies) this.allProxies.set(p.id, this.decryptCredentials(p));
 
     const storedAssignments = await this.storage.read<Array<{ browserId: number; proxyId: string | null }>>(
@@ -218,6 +221,54 @@ export class ProxyManager extends EventEmitter {
     return this.getAll();
   }
 
+  /**
+   * Routes one real Google Search request through this proxy and records
+   * whether Google served a normal results page or its "unusual traffic"
+   * interstitial (see GoogleTrustChecker). Deliberately separate from
+   * validate()/validateAll() — this is a much heavier, slower, Google-
+   * specific request, not a bare connectivity check, so it only ever runs
+   * when explicitly asked for (a single "Check Google" click, or the bulk
+   * "Check Google Trust" action below), never as part of every reload.
+   */
+  async checkGoogleTrustFor(proxyId: string): Promise<ProxyRecord> {
+    const proxy = this.allProxies.get(proxyId);
+    if (!proxy) throw new Error(`Unknown proxy: ${proxyId}`);
+    const settings = this.settings.get();
+    const result = await checkGoogleTrust(proxy, { timeoutMs: settings.proxy.validationTimeoutMs });
+    proxy.googleStatus = result.status;
+    proxy.googleCheckedAt = result.checkedAt;
+    proxy.score = scoreProxy(proxy);
+    this.allProxies.set(proxy.id, proxy);
+    await this.persist();
+    return proxy;
+  }
+
+  /**
+   * Bulk version, scoped to every currently-`working` proxy (the ones
+   * actually in play for assignment) rather than the whole imported pool —
+   * running this against hundreds of already-dead proxies would just be
+   * hundreds of pointless real requests to Google for proxies that were
+   * never going anywhere.
+   */
+  async checkGoogleTrustForWorking(): Promise<ProxyRecord[]> {
+    const settings = this.settings.get();
+    const working = Array.from(this.allProxies.values()).filter((p) => p.status === 'working');
+    const results = await checkGoogleTrustMany(working, {
+      timeoutMs: settings.proxy.validationTimeoutMs,
+      maxConcurrent: 3
+    });
+    for (const result of results) {
+      const proxy = this.allProxies.get(result.proxyId);
+      if (!proxy) continue;
+      proxy.googleStatus = result.status;
+      proxy.googleCheckedAt = result.checkedAt;
+      proxy.score = scoreProxy(proxy);
+      this.allProxies.set(proxy.id, proxy);
+    }
+    await this.persist();
+    return this.getAll();
+  }
+
   async importText(text: string): Promise<ProxyImportResult> {
     const { proxies, invalidLines } = parseBulkText(text, 'Imported');
     const merged = dedupeProxies([...this.importedProxies, ...proxies]);
@@ -270,6 +321,13 @@ export class ProxyManager extends EventEmitter {
   private encryptCredentials(proxy: ProxyRecord): ProxyRecord {
     if (!proxy.password) return proxy;
     return { ...proxy, password: this.storage.encryptSecret(proxy.password) };
+  }
+
+  /** Records saved before the Google-trust-check feature existed won't have
+   * `googleStatus` in their persisted JSON — fill it in on load so the UI
+   * and scorer never see `undefined` there. */
+  private normalizeLoaded(proxy: ProxyRecord): ProxyRecord {
+    return proxy.googleStatus ? proxy : { ...proxy, googleStatus: 'unknown' };
   }
 
   private decryptCredentials(proxy: ProxyRecord): ProxyRecord {

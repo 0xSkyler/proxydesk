@@ -10,8 +10,17 @@ export function scoreProxy(proxy: ProxyRecord): number {
   const latencyScore = latencyComponent(proxy.latencyMs);
   const reliabilityScore = reliabilityComponent(proxy.successCount, proxy.failureCount);
   const countryBonus = proxy.countryVerified ? 10 : 0;
+  // A proxy Google has actually served a real results page to (see
+  // GoogleTrustChecker) is worth ranking above one that's merely
+  // network-reachable but unverified against Google specifically; one
+  // Google is actively serving a CAPTCHA to should sink below almost any
+  // untested proxy, since assigning it just reproduces the exact problem
+  // this check exists to catch. Both are deliberately smaller than the
+  // country bonus so a confirmed-country match still isn't overridden by
+  // Google trust alone.
+  const googleAdjustment = proxy.googleStatus === 'trusted' ? 8 : proxy.googleStatus === 'blocked' ? -35 : 0;
 
-  const raw = latencyScore * 0.5 + reliabilityScore * 0.4 + countryBonus;
+  const raw = latencyScore * 0.5 + reliabilityScore * 0.4 + countryBonus + googleAdjustment;
   return Math.max(0, Math.min(100, Math.round(raw)));
 }
 

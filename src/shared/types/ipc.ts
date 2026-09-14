@@ -57,6 +57,8 @@ export interface AppApi {
     replaceFailed(browserId: number): Promise<ProxyRecord | null>;
     validate(proxyId: string): Promise<ProxyRecord>;
     validateAll(): Promise<ProxyRecord[]>;
+    checkGoogleTrust(proxyId: string): Promise<ProxyRecord>;
+    checkGoogleTrustForWorking(): Promise<ProxyRecord[]>;
     importText(text: string): Promise<ProxyImportResult>;
     importFile(filePath: string): Promise<ProxyImportResult>;
     exportProxies(format: 'txt' | 'csv' | 'json'): Promise<string>;
@@ -102,6 +104,8 @@ export const IPC_CHANNELS = {
   proxyReplaceFailed: 'proxy:replaceFailed',
   proxyValidate: 'proxy:validate',
   proxyValidateAll: 'proxy:validateAll',
+  proxyCheckGoogleTrust: 'proxy:checkGoogleTrust',
+  proxyCheckGoogleTrustForWorking: 'proxy:checkGoogleTrustForWorking',
   proxyImportText: 'proxy:importText',
   proxyImportFile: 'proxy:importFile',
   proxyExport: 'proxy:export',

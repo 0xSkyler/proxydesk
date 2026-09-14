@@ -6,6 +6,14 @@ export type ProxyProtocol = 'http' | 'https' | 'socks4' | 'socks5';
 
 export type ProxyStatus = 'unknown' | 'checking' | 'working' | 'dead';
 
+/** Whether a real Google Search request through this proxy came back clean
+ * ('trusted') or hit Google's "unusual traffic" / CAPTCHA interstitial
+ * ('blocked'). 'unknown' means it has never been checked against Google
+ * specifically — a proxy can be network-'working' (responds, routes
+ * traffic) while still being 'blocked' by Google, since that's a
+ * reputation signal about the IP, not a connectivity one. */
+export type GoogleTrustStatus = 'unknown' | 'trusted' | 'blocked';
+
 export interface ProxyRecord {
   /** Stable id derived from protocol+host+port (see ProxyParser.buildId). */
   id: string;
@@ -32,6 +40,13 @@ export interface ProxyRecord {
   successCount: number;
   /** Number of times this proxy has failed validation, ever. */
   failureCount: number;
+  /** See GoogleTrustStatus. Only ever set by an explicit "Check Google
+   * Trust" check (single or bulk) — plain reload/validate never touches it,
+   * since that's a much heavier, slower request than a bare connectivity
+   * check and shouldn't run on every proxy in a large imported list. */
+  googleStatus: GoogleTrustStatus;
+  /** When googleStatus was last set, ISO timestamp. */
+  googleCheckedAt?: string;
 }
 
 export interface ProxyImportResult {

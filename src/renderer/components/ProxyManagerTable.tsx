@@ -30,9 +30,53 @@ export function ProxyManagerTable(): JSX.Element {
     return list;
   }, [proxies, search, countryFilter, statusFilter, protocolFilter, sortByLatency]);
 
+  const [checkingGoogleId, setCheckingGoogleId] = useState<string | null>(null);
+  const [checkingGoogleAll, setCheckingGoogleAll] = useState(false);
+
   async function validateOne(id: string) {
     const updated = await window.app.proxy.validate(id);
     setProxies(proxies.map((p) => (p.id === id ? updated : p)));
+  }
+
+  async function checkGoogleTrustOne(id: string) {
+    setCheckingGoogleId(id);
+    try {
+      const updated = await window.app.proxy.checkGoogleTrust(id);
+      setProxies(proxies.map((p) => (p.id === id ? updated : p)));
+      pushToast(
+        updated.googleStatus === 'trusted'
+          ? `${updated.host}:${updated.port} — Google served real results. Trusted.`
+          : updated.googleStatus === 'blocked'
+          ? `${updated.host}:${updated.port} — Google served its "unusual traffic" / CAPTCHA page. Blocked.`
+          : `${updated.host}:${updated.port} — could not get a clear read (${updated.googleCheckedAt ? 'request failed' : 'unknown'}).`,
+        updated.googleStatus === 'trusted' ? 'success' : updated.googleStatus === 'blocked' ? 'error' : 'info'
+      );
+    } finally {
+      setCheckingGoogleId(null);
+    }
+  }
+
+  async function checkGoogleTrustForWorking() {
+    const workingCount = proxies.filter((p) => p.status === 'working').length;
+    if (workingCount === 0) {
+      pushToast('No working proxies to check yet — run Validate All or Assign Proxies first.', 'info');
+      return;
+    }
+    setCheckingGoogleAll(true);
+    pushToast(`Checking ${workingCount} working proxy(ies) against Google — this sends a real search through each, so it can take a bit…`);
+    try {
+      const updated = await window.app.proxy.checkGoogleTrustForWorking();
+      setProxies(updated);
+      const checked = updated.filter((p) => p.status === 'working');
+      const trusted = checked.filter((p) => p.googleStatus === 'trusted').length;
+      const blocked = checked.filter((p) => p.googleStatus === 'blocked').length;
+      pushToast(
+        `Google trust check complete — ${trusted}/${checked.length} trusted, ${blocked}/${checked.length} blocked by Google.`,
+        blocked > 0 ? 'error' : 'success'
+      );
+    } finally {
+      setCheckingGoogleAll(false);
+    }
   }
 
   async function exportAs(format: 'txt' | 'csv' | 'json') {
@@ -46,6 +90,13 @@ export function ProxyManagerTable(): JSX.Element {
       <div className="panel__header">
         <h2>Proxy Manager</h2>
         <div className="panel__actions">
+          <button
+            title='Sends one real Google search through every "working" proxy and checks whether Google served real results or its unusual-traffic/CAPTCHA page.'
+            disabled={checkingGoogleAll}
+            onClick={() => void checkGoogleTrustForWorking()}
+          >
+            {checkingGoogleAll ? 'Checking against Google…' : 'Check Google Trust (Working)'}
+          </button>
           <button onClick={() => void exportAs('txt')}>Export TXT</button>
           <button onClick={() => void exportAs('csv')}>Export CSV</button>
           <button onClick={() => void exportAs('json')}>Export JSON</button>
@@ -84,6 +135,9 @@ export function ProxyManagerTable(): JSX.Element {
             <th>Latency</th>
             <th>Score</th>
             <th>Status</th>
+            <th title="Whether a real Google search through this proxy came back clean or hit Google's unusual-traffic / CAPTCHA page">
+              Google
+            </th>
             <th>Sources</th>
             <th />
           </tr>
@@ -109,15 +163,27 @@ export function ProxyManagerTable(): JSX.Element {
                 {p.status === 'unknown' && <span className="status-neutral">Unknown</span>}
                 {p.status === 'checking' && <span className="status-neutral">Checking…</span>}
               </td>
+              <td>
+                {p.googleStatus === 'trusted' && <span className="status-ok" title={p.googleCheckedAt}>✓ Trusted</span>}
+                {p.googleStatus === 'blocked' && <span className="status-bad" title={p.googleCheckedAt}>✕ Blocked</span>}
+                {p.googleStatus === 'unknown' && <span className="status-neutral">Not checked</span>}
+              </td>
               <td>{p.sources.join(', ')}</td>
               <td>
                 <button onClick={() => void validateOne(p.id)}>Test</button>
+                <button
+                  title="Send one real Google search through this proxy to see if Google trusts it or serves a CAPTCHA"
+                  disabled={checkingGoogleId === p.id}
+                  onClick={() => void checkGoogleTrustOne(p.id)}
+                >
+                  {checkingGoogleId === p.id ? 'Checking…' : 'Check Google'}
+                </button>
               </td>
             </tr>
           ))}
           {filtered.length === 0 && (
             <tr>
-              <td colSpan={8} className="muted">
+              <td colSpan={9} className="muted">
                 No proxies available. Use Import Proxies to add your own list.
               </td>
             </tr>

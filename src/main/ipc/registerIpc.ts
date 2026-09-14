@@ -87,6 +87,8 @@ export function registerIpc(deps: IpcDeps): void {
   });
   ipcMain.handle(IPC_CHANNELS.proxyValidate, (_e, proxyId: string) => proxyManager.validate(proxyId));
   ipcMain.handle(IPC_CHANNELS.proxyValidateAll, () => proxyManager.validateAll());
+  ipcMain.handle(IPC_CHANNELS.proxyCheckGoogleTrust, (_e, proxyId: string) => proxyManager.checkGoogleTrustFor(proxyId));
+  ipcMain.handle(IPC_CHANNELS.proxyCheckGoogleTrustForWorking, () => proxyManager.checkGoogleTrustForWorking());
   ipcMain.handle(IPC_CHANNELS.proxyImportText, (_e, text: string) => proxyManager.importText(text));
   ipcMain.handle(IPC_CHANNELS.proxyImportFile, (_e, filePath: string) => proxyManager.importFile(filePath));
   ipcMain.handle(IPC_CHANNELS.proxyExport, (_e, format: 'txt' | 'csv' | 'json') => proxyManager.exportProxies(format));

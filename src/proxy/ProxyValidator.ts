@@ -29,7 +29,10 @@ function buildAgentUrl(proxy: ProxyRecord): string {
   return `${scheme}://${auth}${proxy.host}:${proxy.port}`;
 }
 
-function buildAgent(proxy: ProxyRecord) {
+/** Exported for GoogleTrustChecker, which needs to route a real request
+ * through the same proxy-agent machinery used here rather than duplicating
+ * it. */
+export function buildAgent(proxy: ProxyRecord) {
   const url = buildAgentUrl(proxy);
   if (proxy.protocol === 'socks4' || proxy.protocol === 'socks5') {
     return new SocksProxyAgent(url);

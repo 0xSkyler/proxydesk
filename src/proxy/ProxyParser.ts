@@ -154,6 +154,7 @@ export function toProxyRecord(
     score: 0,
     successCount: 0,
     failureCount: 0,
+    googleStatus: 'unknown',
     ...extra
   };
 }
