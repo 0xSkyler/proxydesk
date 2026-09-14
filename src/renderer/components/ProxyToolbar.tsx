@@ -15,7 +15,23 @@ export function ProxyToolbar(): JSX.Element {
   const setActivePanel = useAppStore((s) => s.setActivePanel);
   const activePanel = useAppStore((s) => s.activePanel);
 
+  const settings = useAppStore((s) => s.settings);
+  const setSettings = useAppStore((s) => s.setSettings);
+  const keepAliveOn = settings.browser.keepAliveEnabled;
+
   const [importOpen, setImportOpen] = useState(false);
+
+  async function toggleKeepAlive() {
+    const nextEnabled = !keepAliveOn;
+    const updated = await window.app.settings.update({ browser: { ...settings.browser, keepAliveEnabled: nextEnabled } });
+    setSettings(updated);
+    pushToast(
+      nextEnabled
+        ? `Keep sessions alive turned ON — browsers will auto-scroll every ${settings.browser.keepAliveIntervalSec}s while you're away.`
+        : 'Keep sessions alive turned OFF.',
+      'info'
+    );
+  }
 
   async function assignProxies() {
     setReloading(true);
@@ -98,6 +114,13 @@ export function ProxyToolbar(): JSX.Element {
       <div className="proxy-toolbar__group">
         <button onClick={() => void window.app.browser.reloadAll()}>Reload All Browsers</button>
         <button onClick={() => void window.app.browser.stopAll()}>Stop All</button>
+        <button
+          className={keepAliveOn ? 'btn-primary' : ''}
+          title="Auto-scrolls every browser periodically so sites don't log you out while you're away (e.g. tending to a lab experiment). Toggle the interval in Settings."
+          onClick={() => void toggleKeepAlive()}
+        >
+          {keepAliveOn ? '● Keep Alive: ON' : 'Keep Alive: OFF'}
+        </button>
       </div>
 
       <nav className="proxy-toolbar__nav">
