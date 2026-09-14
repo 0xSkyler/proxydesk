@@ -129,7 +129,7 @@ export class BrowserManager extends EventEmitter {
     const state: BrowserState = {
       id,
       label: `Browser ${id}`,
-      url: options.startPage,
+      url: normalizeUrl(options.startPage),
       loading: false,
       canGoBack: false,
       canGoForward: false,
@@ -143,7 +143,8 @@ export class BrowserManager extends EventEmitter {
     this.wireEvents(managed, options);
 
     this.window?.addBrowserView(view);
-    await view.webContents.loadURL(options.startPage).catch((err) => {
+    const startUrl = normalizeUrl(options.startPage);
+    await view.webContents.loadURL(startUrl).catch((err) => {
       logger.warn('browser', `Browser ${id} failed initial load: ${(err as Error).message}`);
       this.updateState(managed, { connectionStatus: 'proxy-failed', errorMessage: (err as Error).message });
     });
@@ -219,7 +220,7 @@ export class BrowserManager extends EventEmitter {
     const lastUrl = managed.state.url;
     logger.info('browser', `Restarting Browser ${managed.id} (attempt ${managed.restartAttempts}/3).`);
     try {
-      await managed.view.webContents.loadURL(lastUrl || options.startPage);
+      await managed.view.webContents.loadURL(normalizeUrl(lastUrl || options.startPage));
       this.updateState(managed, { connectionStatus: 'connected' });
     } catch (err) {
       logger.warn('browser', `Browser ${managed.id} restart attempt failed: ${(err as Error).message}`);

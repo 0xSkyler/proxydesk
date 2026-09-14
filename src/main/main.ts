@@ -126,6 +126,7 @@ async function bootstrap(): Promise<void> {
   settingsManager.onChange((updated) => {
     browserManager.setKeepAlive(updated.browser.keepAliveEnabled, updated.browser.keepAliveIntervalSec * 1000);
     scheduleProxyRotation();
+    void syncBrowserCount(updated);
   });
 
   logger.info('application', 'ProxyDesk ready.');
@@ -189,6 +190,43 @@ async function runProxyRotation(): Promise<void> {
     );
   } catch (err) {
     logger.warn('proxy', `Automatic proxy rotation failed: ${(err as Error).message}. Will retry on the next cycle.`);
+  }
+}
+
+/**
+ * Browsers are only ever created up front at bootstrap for whatever
+ * `browserCount` was at the time — nothing previously reacted when the
+ * setting changed later in Settings, so raising it past the number of
+ * browsers actually running just added empty grid tiles with no real
+ * BrowserView behind them (rendered as solid black, since there was never
+ * any Chromium content to show). This brings the live set of managed
+ * browsers in line with the current `browserCount` setting: creating
+ * whatever new ids are now in range, and tearing down any that fell out of
+ * range when the count was lowered.
+ */
+async function syncBrowserCount(settings: ReturnType<SettingsManager['get']>): Promise<void> {
+  const desiredIds = new Set(BROWSER_IDS.slice(0, settings.browser.browserCount));
+  const existingIds = new Set(browserManager.getAll().map((b) => b.id));
+
+  const toCreate = Array.from(desiredIds).filter((id) => !existingIds.has(id));
+  const toDestroy = Array.from(existingIds).filter((id) => !desiredIds.has(id));
+
+  for (const id of toCreate) {
+    await browserManager.createBrowser(id, {
+      persistSessions: settings.browser.persistSessions,
+      startPage: settings.browser.startPage,
+      userAgent: settings.browser.userAgent
+    });
+  }
+  for (const id of toDestroy) {
+    await browserManager.destroyBrowser(id);
+  }
+
+  if (toCreate.length > 0) {
+    logger.info('application', `Browser count increased — created ${toCreate.length} new browser(s).`);
+  }
+  if (toDestroy.length > 0) {
+    logger.info('application', `Browser count decreased — closed ${toDestroy.length} browser(s).`);
   }
 }
 
