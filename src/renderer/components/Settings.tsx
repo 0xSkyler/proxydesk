@@ -157,8 +157,14 @@ export function Settings(): JSX.Element {
             checked={settings.proxy.validationEnabled}
             onChange={(e) => void apply({ proxy: { ...settings.proxy, validationEnabled: e.target.checked } })}
           />
-          Proxy validation
+          Validate proxies before assigning
         </label>
+        <p className="muted">
+          On: every &ldquo;Assign Proxies&rdquo; click first tests each candidate proxy for real connectivity, then
+          assigns only the ones that respond. Off: skips that check and assigns straight from whatever you imported
+          — turn this off if you already checked the list before importing it, so assignment happens instantly.
+          Either way, &ldquo;Check Google Trust&rdquo; in Proxy Manager is separate and always available on demand.
+        </p>
         <label>
           Validation timeout (ms)
           <input

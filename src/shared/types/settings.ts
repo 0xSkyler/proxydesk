@@ -30,6 +30,15 @@ export interface BrowserSettings {
 export interface ProxySettings {
   autoLoadOnStartup: boolean;
   autoReplaceFailed: boolean;
+  /** When true (default), every "Assign Proxies" click first makes a real
+   * connectivity request through each candidate proxy to confirm it's
+   * actually alive before assigning it. Turn this off if the imported list
+   * was already checked before import (e.g. by whatever scraped/verified
+   * it) — assignment then treats every non-dead proxy as immediately
+   * eligible and skips straight to assigning, so a fresh import can be
+   * assigned to browsers instantly instead of waiting through a second
+   * connectivity pass. "Check Google Trust" is unaffected either way — it's
+   * a separate, deliberately-manual check (see GoogleTrustChecker). */
   validationEnabled: boolean;
   validationTimeoutMs: number;
   allowProxyReuse: boolean;

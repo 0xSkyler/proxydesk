@@ -46,9 +46,17 @@ export function ProxyToolbar(): JSX.Element {
         // pool can be empty.
         pushToast('No proxies to assign yet — use Import Proxies to add your own list.', 'info');
       } else {
+        const assignedCount = summary.assignments.filter((a) => a.proxy).length;
+        // With "Validate proxies before assigning" off (Settings > Proxy),
+        // reload() skips the connectivity check entirely, so summary.working
+        // stays 0 even though assignment itself succeeded — showing
+        // "0/750 working" there would read as a failure when nothing
+        // actually failed, just that the check was deliberately skipped.
         pushToast(
-          `Assign complete — ${summary.working}/${summary.found} working, ` +
-            `${summary.assignments.filter((a) => a.proxy).length}/${summary.assignments.length} browsers assigned.`,
+          settings.proxy.validationEnabled
+            ? `Assign complete — ${summary.working}/${summary.found} working, ` +
+                `${assignedCount}/${summary.assignments.length} browsers assigned.`
+            : `Assign complete (validation skipped) — ${assignedCount}/${summary.assignments.length} browsers assigned.`,
           'success'
         );
       }

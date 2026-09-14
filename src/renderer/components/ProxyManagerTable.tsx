@@ -5,8 +5,20 @@ import type { ProxyProtocol, ProxyStatus } from '../../shared/types/proxy';
 
 export function ProxyManagerTable(): JSX.Element {
   const proxies = useAppStore((s) => s.proxies);
+  const browsers = useAppStore((s) => s.browsers);
   const pushToast = useAppStore((s) => s.pushToast);
   const setProxies = useAppStore((s) => s.setProxies);
+
+  // The set of proxy ids actually assigned to a browser right now. Used
+  // (instead of `status === 'working'`) to scope the bulk Google-trust
+  // check — with "Validate proxies before assigning" turned off, an
+  // assigned proxy's status stays 'unknown' forever since it never goes
+  // through the connectivity check, so a 'working'-only filter would find
+  // nothing to check in exactly that fast-assign workflow.
+  const assignedProxyIds = useMemo(
+    () => new Set(Object.values(browsers).map((b) => b.proxy?.id).filter((id): id is string => Boolean(id))),
+    [browsers]
+  );
 
   const [search, setSearch] = useState('');
   const [countryFilter, setCountryFilter] = useState('');
@@ -57,17 +69,17 @@ export function ProxyManagerTable(): JSX.Element {
   }
 
   async function checkGoogleTrustForWorking() {
-    const workingCount = proxies.filter((p) => p.status === 'working').length;
-    if (workingCount === 0) {
-      pushToast('No working proxies to check yet — run Validate All or Assign Proxies first.', 'info');
+    const assignedCount = assignedProxyIds.size;
+    if (assignedCount === 0) {
+      pushToast('No proxies assigned to a browser yet — run Assign Proxies first.', 'info');
       return;
     }
     setCheckingGoogleAll(true);
-    pushToast(`Checking ${workingCount} working proxy(ies) against Google — this sends a real search through each, so it can take a bit…`);
+    pushToast(`Checking ${assignedCount} assigned proxy(ies) against Google — this sends a real search through each, so it can take a bit…`);
     try {
       const updated = await window.app.proxy.checkGoogleTrustForWorking();
       setProxies(updated);
-      const checked = updated.filter((p) => p.status === 'working');
+      const checked = updated.filter((p) => assignedProxyIds.has(p.id));
       const trusted = checked.filter((p) => p.googleStatus === 'trusted').length;
       const blocked = checked.filter((p) => p.googleStatus === 'blocked').length;
       pushToast(
@@ -91,11 +103,11 @@ export function ProxyManagerTable(): JSX.Element {
         <h2>Proxy Manager</h2>
         <div className="panel__actions">
           <button
-            title='Sends one real Google search through every "working" proxy and checks whether Google served real results or its unusual-traffic/CAPTCHA page.'
+            title="Sends one real Google search through every proxy currently assigned to a browser, and checks whether Google served real results or its unusual-traffic/CAPTCHA page."
             disabled={checkingGoogleAll}
             onClick={() => void checkGoogleTrustForWorking()}
           >
-            {checkingGoogleAll ? 'Checking against Google…' : 'Check Google Trust (Working)'}
+            {checkingGoogleAll ? 'Checking against Google…' : 'Check Google Trust (Assigned)'}
           </button>
           <button onClick={() => void exportAs('txt')}>Export TXT</button>
           <button onClick={() => void exportAs('csv')}>Export CSV</button>

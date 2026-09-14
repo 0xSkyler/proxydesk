@@ -244,16 +244,28 @@ export class ProxyManager extends EventEmitter {
   }
 
   /**
-   * Bulk version, scoped to every currently-`working` proxy (the ones
-   * actually in play for assignment) rather than the whole imported pool —
-   * running this against hundreds of already-dead proxies would just be
-   * hundreds of pointless real requests to Google for proxies that were
+   * Bulk version, scoped to every proxy actually assigned to a browser
+   * right now (i.e. currently in play), rather than the whole imported
+   * pool — running this against hundreds of unused/dead proxies would just
+   * be hundreds of pointless real requests to Google for proxies that were
    * never going anywhere.
+   *
+   * Deliberately keyed off `this.assignments`, not `status === 'working'`:
+   * with "Validate proxies before assigning" turned off (see
+   * ProxySettings.validationEnabled), an assigned proxy's status stays
+   * 'unknown' forever — it was never run through the connectivity check —
+   * so filtering on 'working' here would silently find nothing to check in
+   * exactly the fast-assign workflow this bulk action is most useful for.
    */
   async checkGoogleTrustForWorking(): Promise<ProxyRecord[]> {
     const settings = this.settings.get();
-    const working = Array.from(this.allProxies.values()).filter((p) => p.status === 'working');
-    const results = await checkGoogleTrustMany(working, {
+    const assignedIds = new Set(
+      Array.from(this.assignments.values())
+        .filter((p): p is ProxyRecord => p != null)
+        .map((p) => p.id)
+    );
+    const assigned = Array.from(this.allProxies.values()).filter((p) => assignedIds.has(p.id));
+    const results = await checkGoogleTrustMany(assigned, {
       timeoutMs: settings.proxy.validationTimeoutMs,
       maxConcurrent: 3
     });
