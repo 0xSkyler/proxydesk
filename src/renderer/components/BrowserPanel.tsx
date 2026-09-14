@@ -32,6 +32,7 @@ const STATUS_DOT: Record<string, string> = {
 export function BrowserPanel({ id, compact = false }: Props): JSX.Element {
   const browser = useAppStore((s) => s.browsers[id]);
   const activePanel = useAppStore((s) => s.activePanel);
+  const openModalCount = useAppStore((s) => s.openModalCount);
   const viewportRef = useRef<HTMLDivElement>(null);
   const [addressValue, setAddressValue] = useState(browser?.url ?? '');
   const [menuOpen, setMenuOpen] = useState(false);
@@ -74,18 +75,20 @@ export function BrowserPanel({ id, compact = false }: Props): JSX.Element {
     };
   }, [reportBounds]);
 
-  // Switching panels (e.g. Grid -> Settings) toggles the grid wrapper
-  // between its normal layout and an offscreen `position: fixed` one (see
-  // App.tsx / global.css's .grid-wrapper--offscreen) purely by moving it —
-  // the viewport div's *size* never changes, only its position. ResizeObserver
-  // only fires on size changes, so without this effect the BrowserView would
-  // stay planted at its old on-screen coordinates and render on top of
-  // whichever panel is now showing. Re-measuring on every activePanel change
+  // Switching panels (e.g. Grid -> Settings), or opening a modal dialog on
+  // top of the grid (e.g. Import Proxies — tracked via openModalCount, see
+  // App.tsx), toggles the grid wrapper between its normal layout and an
+  // offscreen `position: fixed` one (see App.tsx / global.css's
+  // .grid-wrapper--offscreen) purely by moving it — the viewport div's
+  // *size* never changes, only its position. ResizeObserver only fires on
+  // size changes, so without this effect the BrowserView would stay
+  // planted at its old on-screen coordinates and render on top of
+  // whichever panel or dialog is now showing. Re-measuring on every change
   // (after React has committed the new class name) keeps the real native
   // BrowserView in sync with where its placeholder div actually is.
   useEffect(() => {
     reportBounds();
-  }, [reportBounds, activePanel]);
+  }, [reportBounds, activePanel, openModalCount]);
 
   if (!browser) return <div className="browser-panel" />;
 

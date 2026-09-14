@@ -65,6 +65,7 @@ export default function App(): JSX.Element {
 
   const activePanel = useAppStore((s) => s.activePanel);
   const setActivePanel = useAppStore((s) => s.setActivePanel);
+  const openModalCount = useAppStore((s) => s.openModalCount);
   const [ready, setReady] = useState(false);
 
   useEffect(() => {
@@ -101,12 +102,21 @@ export default function App(): JSX.Element {
         {/* BrowserGrid stays mounted (never display:none) even when another
             panel is active, so its ResizeObservers keep firing and its
             BrowserPanels keep reporting real bounds to the main process.
-            When another panel is showing, this wrapper is pushed off-screen
-            with a fixed position instead of hidden, so the underlying
-            BrowserViews (real Chromium content, positioned independently of
-            React's DOM by the main process) move off-screen with it rather
-            than floating on top of whatever panel is visible. */}
-        <div className={activePanel === 'grid' ? 'grid-wrapper' : 'grid-wrapper grid-wrapper--offscreen'}>
+            When another panel is showing — or a modal dialog (e.g. Import
+            Proxies) is open on top of the grid itself, tracked via
+            openModalCount rather than activePanel since a dialog like that
+            opens without switching panels — this wrapper is pushed
+            off-screen with a fixed position instead of hidden, so the
+            underlying BrowserViews (real Chromium content, positioned
+            independently of React's DOM by the main process, and always
+            painted above ordinary DOM content regardless of z-index) move
+            off-screen with it rather than floating on top of whatever's
+            visible. */}
+        <div
+          className={
+            activePanel === 'grid' && openModalCount === 0 ? 'grid-wrapper' : 'grid-wrapper grid-wrapper--offscreen'
+          }
+        >
           <BrowserGrid />
         </div>
         {activePanel === 'proxyManager' && <ProxyManagerTable />}

@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useAppStore } from '../stores/appStore';
 import type { ProxyImportResult } from '../../shared/types/proxy';
 
@@ -12,6 +12,26 @@ export function ProxyImportDialog({ onClose }: Props): JSX.Element {
   const [busy, setBusy] = useState(false);
   const pushToast = useAppStore((s) => s.pushToast);
   const setProxies = useAppStore((s) => s.setProxies);
+  const openModal = useAppStore((s) => s.openModal);
+  const closeModal = useAppStore((s) => s.closeModal);
+
+  // This dialog can be open while the Browsers panel is still showing (the
+  // toolbar's Import Proxies button doesn't switch panels) — but the real
+  // BrowserViews behind each grid tile are native, OS-level content that
+  // always paints on top of ordinary DOM elements regardless of CSS
+  // z-index, including this modal's backdrop. Without this, the dialog
+  // would silently render underneath the live browser tiles instead of
+  // over them. Registering while mounted (and unregistering on close) is
+  // what lets App.tsx push the grid off-screen for exactly as long as this
+  // dialog is up, the same way it already does when switching to another
+  // panel entirely (see grid-wrapper--offscreen).
+  useEffect(() => {
+    openModal();
+    return () => closeModal();
+    // open/close are stable zustand actions; re-running this on their
+    // identity would defeat the mount/unmount-only pairing this depends on.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   async function doImport(source: string) {
     setBusy(true);

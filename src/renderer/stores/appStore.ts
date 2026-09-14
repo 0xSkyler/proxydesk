@@ -17,6 +17,12 @@ interface AppStoreState {
   isReloadingProxies: boolean;
   reloadProgress: ReloadProgress | null;
   toasts: Array<{ id: string; message: string; kind: 'info' | 'error' | 'success' }>;
+  /** Count of currently-open modal dialogs (Import Proxies, and any future
+   * one) rather than a plain boolean, so two modals opening/closing in any
+   * order can never leave this stuck "open" or "closed" incorrectly. See
+   * openModal/closeModal — always call them in a pair (e.g. open on mount,
+   * close on unmount/close), never set this directly. */
+  openModalCount: number;
 
   setBrowsers(list: BrowserState[]): void;
   upsertBrowser(state: BrowserState): void;
@@ -29,6 +35,8 @@ interface AppStoreState {
   setReloadProgress(progress: ReloadProgress | null): void;
   pushToast(message: string, kind?: 'info' | 'error' | 'success'): void;
   dismissToast(id: string): void;
+  openModal(): void;
+  closeModal(): void;
 }
 
 export const useAppStore = create<AppStoreState>((set) => ({
@@ -56,6 +64,7 @@ export const useAppStore = create<AppStoreState>((set) => ({
   isReloadingProxies: false,
   reloadProgress: null,
   toasts: [],
+  openModalCount: 0,
 
   setBrowsers: (list) => set({ browsers: Object.fromEntries(list.map((b) => [b.id, b])) }),
   upsertBrowser: (state) => set((s) => ({ browsers: { ...s.browsers, [state.id]: state } })),
@@ -75,5 +84,7 @@ export const useAppStore = create<AppStoreState>((set) => ({
   setReloadProgress: (progress) => set({ reloadProgress: progress }),
   pushToast: (message, kind = 'info') =>
     set((s) => ({ toasts: [...s.toasts, { id: `${Date.now()}-${Math.random()}`, message, kind }] })),
-  dismissToast: (id) => set((s) => ({ toasts: s.toasts.filter((t) => t.id !== id) }))
+  dismissToast: (id) => set((s) => ({ toasts: s.toasts.filter((t) => t.id !== id) })),
+  openModal: () => set((s) => ({ openModalCount: s.openModalCount + 1 })),
+  closeModal: () => set((s) => ({ openModalCount: Math.max(0, s.openModalCount - 1) }))
 }));
