@@ -95,7 +95,8 @@ async function bootstrap(): Promise<void> {
     await browserManager.createBrowser(id, {
       persistSessions: settings.browser.persistSessions,
       startPage: settings.browser.startPage,
-      userAgent: settings.browser.userAgent
+      userAgent: settings.browser.userAgent,
+      onGoogleBlocked: (browserId, continueUrl) => void handleGoogleBlocked(browserId, continueUrl)
     });
   }
 
@@ -215,7 +216,8 @@ async function syncBrowserCount(settings: ReturnType<SettingsManager['get']>): P
     await browserManager.createBrowser(id, {
       persistSessions: settings.browser.persistSessions,
       startPage: settings.browser.startPage,
-      userAgent: settings.browser.userAgent
+      userAgent: settings.browser.userAgent,
+      onGoogleBlocked: (browserId, continueUrl) => void handleGoogleBlocked(browserId, continueUrl)
     });
   }
   for (const id of toDestroy) {
@@ -227,6 +229,42 @@ async function syncBrowserCount(settings: ReturnType<SettingsManager['get']>): P
   }
   if (toDestroy.length > 0) {
     logger.info('application', `Browser count decreased — closed ${toDestroy.length} browser(s).`);
+  }
+}
+
+/**
+ * Fires when a browser lands on Google's CAPTCHA interstitial while
+ * browsing normally (see BrowserManager.onGoogleBlocked) — the same
+ * signal the deliberate "Check Google Trust" feature looks for, just
+ * discovered live. Marks the proxy that just got flagged, swaps in a
+ * different one, and retries the page the browser was actually trying to
+ * reach (not the interstitial itself). Only reacts when "Auto-replace
+ * failed proxies" is on (Settings > Proxy) — BrowserManager already caps
+ * how many times this fires in a row per browser (see
+ * MAX_GOOGLE_BLOCK_RETRIES), so this itself doesn't need its own limit.
+ */
+async function handleGoogleBlocked(browserId: number, continueUrl: string): Promise<void> {
+  const settings = settingsManager.get();
+  if (!settings.proxy.autoReplaceFailed) return;
+
+  try {
+    await proxyManager.markGoogleBlocked(browserId);
+    const newProxy = await proxyManager.replaceFailed(browserId);
+    if (!newProxy) {
+      logger.warn('proxy', `Browser ${browserId}: no alternative proxy available after a Google CAPTCHA block.`);
+      return;
+    }
+    // assignProxy() reloads whatever page the browser is currently on —
+    // that's the CAPTCHA interstitial itself right now — so follow it with
+    // an explicit navigate() back to the page that was actually wanted.
+    await browserManager.assignProxy(browserId, newProxy);
+    await browserManager.navigate(browserId, continueUrl);
+    logger.info(
+      'proxy',
+      `Browser ${browserId}: swapped to ${newProxy.host}:${newProxy.port} after a Google CAPTCHA block and retried.`
+    );
+  } catch (err) {
+    logger.warn('proxy', `Browser ${browserId}: failed to auto-recover from a Google CAPTCHA block: ${(err as Error).message}`);
   }
 }
 

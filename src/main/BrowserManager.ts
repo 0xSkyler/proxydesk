@@ -50,7 +50,26 @@ export interface BrowserManagerOptions {
   startPage: string;
   userAgent: string;
   onCrash?: (id: number) => void;
+  /** Fired when this browser lands on Google's "unusual traffic" / CAPTCHA
+   * interstitial while browsing normally (not via the deliberate Google
+   * Trust Check — see GoogleTrustChecker) — i.e. the exact problem that
+   * check exists to catch, just discovered live instead of ahead of time.
+   * `continueUrl` is the page the browser was actually trying to reach
+   * (extracted from the interstitial's own `continue=` param), so the
+   * caller can retry that specific page once a different proxy is in
+   * place, rather than just reloading the interstitial itself. Only fires
+   * while under MAX_GOOGLE_BLOCK_RETRIES for this browser — see
+   * maybeHandleGoogleBlock. */
+  onGoogleBlocked?: (id: number, continueUrl: string) => void;
 }
+
+/** Cap on automatic proxy swaps triggered by hitting Google's CAPTCHA page
+ * in a row, before giving up and leaving it for a manual "Change Proxy"
+ * click — without this, a proxy pool that's mostly Google-flagged (a real
+ * possibility with free/public lists) could otherwise have a browser
+ * silently burning through proxies forever. Resets on the next explicit
+ * navigate() (fresh intent) or once a page loads that ISN'T the block page. */
+const MAX_GOOGLE_BLOCK_RETRIES = 3;
 
 interface ManagedBrowser {
   id: number;
@@ -58,6 +77,30 @@ interface ManagedBrowser {
   session: Session;
   state: BrowserState;
   restartAttempts: number;
+  /** Consecutive Google-CAPTCHA hits since the last successful (non-block)
+   * navigation or explicit navigate() call — see MAX_GOOGLE_BLOCK_RETRIES. */
+  googleBlockRetries: number;
+}
+
+/**
+ * If `url` is Google's "unusual traffic" / CAPTCHA interstitial
+ * (`google.<tld>/sorry/...`), returns the page it was guarding — pulled
+ * from the interstitial's own `continue=` query param, which Google always
+ * sets to the original request URL — so a retry can go straight back to
+ * what the user/browser actually wanted instead of reloading the
+ * interstitial itself. Returns null for any other URL.
+ */
+export function extractGoogleBlockContinueUrl(url: string): string | null {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return null;
+  }
+  if (!/(^|\.)google\.[a-z.]+$/i.test(parsed.hostname)) return null;
+  if (!parsed.pathname.startsWith('/sorry/')) return null;
+  const continueParam = parsed.searchParams.get('continue');
+  return continueParam || url;
 }
 
 // eslint-disable-next-line @typescript-eslint/no-unsafe-declaration-merging -- standard Node EventEmitter typed-events pattern
@@ -138,7 +181,7 @@ export class BrowserManager extends EventEmitter {
       crashCount: 0
     };
 
-    const managed: ManagedBrowser = { id, view, session: ses, state, restartAttempts: 0 };
+    const managed: ManagedBrowser = { id, view, session: ses, state, restartAttempts: 0, googleBlockRetries: 0 };
     this.browsers.set(id, managed);
     this.wireEvents(managed, options);
 
@@ -163,7 +206,10 @@ export class BrowserManager extends EventEmitter {
         connectionStatus: 'connected'
       })
     );
-    wc.on('did-navigate', (_e, url) => this.updateState(managed, { url }));
+    wc.on('did-navigate', (_e, url) => {
+      this.updateState(managed, { url });
+      this.maybeHandleGoogleBlock(managed, url, options);
+    });
     wc.on('did-navigate-in-page', (_e, url) => this.updateState(managed, { url }));
     wc.on('page-title-updated', (_e, title) => this.updateState(managed, { title }));
     wc.on('page-favicon-updated', (_e, favicons) =>
@@ -227,6 +273,48 @@ export class BrowserManager extends EventEmitter {
     }
   }
 
+  /**
+   * Called on every navigation. If the URL just landed on is Google's
+   * CAPTCHA interstitial, records it as a failure on this browser (so the
+   * UI shows *why* nothing loaded, instead of it just looking stuck) and,
+   * while still under MAX_GOOGLE_BLOCK_RETRIES, notifies the caller so it
+   * can swap in a different proxy and retry the real page — see
+   * BrowserManagerOptions.onGoogleBlocked. A normal page load (anything
+   * that isn't the interstitial) resets the counter, so retries are
+   * counted per unbroken streak of blocks, not cumulatively for the
+   * browser's whole lifetime.
+   */
+  private maybeHandleGoogleBlock(managed: ManagedBrowser, url: string, options: BrowserManagerOptions): void {
+    const continueUrl = extractGoogleBlockContinueUrl(url);
+    if (!continueUrl) {
+      managed.googleBlockRetries = 0;
+      return;
+    }
+
+    if (managed.googleBlockRetries >= MAX_GOOGLE_BLOCK_RETRIES) {
+      this.updateState(managed, {
+        connectionStatus: 'proxy-failed',
+        errorMessage: `Blocked by Google (CAPTCHA) — gave up after ${MAX_GOOGLE_BLOCK_RETRIES} automatic proxy retries. Use "Change Proxy" to try another manually.`
+      });
+      logger.warn(
+        'browser',
+        `Browser ${managed.id}: exhausted ${MAX_GOOGLE_BLOCK_RETRIES} automatic proxy retries after repeated Google CAPTCHA blocks.`
+      );
+      return;
+    }
+
+    this.updateState(managed, {
+      connectionStatus: 'proxy-failed',
+      errorMessage: 'Blocked by Google (CAPTCHA) on this proxy — retrying automatically with a different one…'
+    });
+    managed.googleBlockRetries += 1;
+    logger.warn(
+      'browser',
+      `Browser ${managed.id}: hit Google's CAPTCHA page (attempt ${managed.googleBlockRetries}/${MAX_GOOGLE_BLOCK_RETRIES}) — requesting a proxy swap.`
+    );
+    options.onGoogleBlocked?.(managed.id, continueUrl);
+  }
+
   private updateState(managed: ManagedBrowser, patch: Partial<BrowserState>): void {
     managed.state = { ...managed.state, ...patch };
     this.emit('stateChanged', managed.state);
@@ -246,6 +334,7 @@ export class BrowserManager extends EventEmitter {
 
   async navigate(id: number, url: string): Promise<void> {
     const managed = this.get(id);
+    managed.googleBlockRetries = 0;
     const normalized = normalizeUrl(url);
     await managed.view.webContents.loadURL(normalized);
   }

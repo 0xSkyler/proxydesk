@@ -146,6 +146,24 @@ export class ProxyManager extends EventEmitter {
     await this.persist();
   }
 
+  /**
+   * Records that the proxy currently assigned to `browserId` just got a
+   * live Google CAPTCHA hit (see BrowserManager.onGoogleBlocked) — i.e. the
+   * exact signal the deliberate "Check Google Trust" feature looks for,
+   * just discovered by actually browsing instead. No-op if that browser has
+   * no assigned proxy (shouldn't happen — a block can only occur while
+   * routed through one — but never worth throwing over).
+   */
+  async markGoogleBlocked(browserId: number): Promise<void> {
+    const proxy = this.assignments.get(browserId);
+    if (!proxy) return;
+    proxy.googleStatus = 'blocked';
+    proxy.googleCheckedAt = new Date().toISOString();
+    proxy.score = scoreProxy(proxy);
+    this.allProxies.set(proxy.id, proxy);
+    await this.persist();
+  }
+
   async replaceFailed(browserId: number, excludeIds: Set<string> = new Set()): Promise<ProxyRecord | null> {
     const settings = this.settings.get();
     const current = this.assignments.get(browserId);

@@ -29,6 +29,13 @@ export interface BrowserSettings {
 
 export interface ProxySettings {
   autoLoadOnStartup: boolean;
+  /** When a browser hits Google's "unusual traffic" / CAPTCHA interstitial
+   * while browsing normally (see BrowserManager.onGoogleBlocked /
+   * main.ts's handleGoogleBlocked), turning this on marks that proxy
+   * blocked, swaps in a different one, and retries the page the browser
+   * was actually trying to reach — up to a small fixed number of times in
+   * a row (see MAX_GOOGLE_BLOCK_RETRIES) before giving up and leaving it
+   * for a manual "Change Proxy" click. */
   autoReplaceFailed: boolean;
   /** When true (default), every "Assign Proxies" click first makes a real
    * connectivity request through each candidate proxy to confirm it's

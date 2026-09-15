@@ -149,8 +149,13 @@ export function Settings(): JSX.Element {
             checked={settings.proxy.autoReplaceFailed}
             onChange={(e) => void apply({ proxy: { ...settings.proxy, autoReplaceFailed: e.target.checked } })}
           />
-          Auto-replace failed proxies
+          Auto-replace proxies blocked by Google (CAPTCHA)
         </label>
+        <p className="muted">
+          When a browser hits Google&rsquo;s &ldquo;unusual traffic&rdquo; / CAPTCHA page while browsing normally,
+          turning this on swaps in a different proxy and retries the page automatically (up to 3 tries in a row
+          before giving up and leaving it for a manual &ldquo;Change Proxy&rdquo; click).
+        </p>
         <label className="checkbox-label">
           <input
             type="checkbox"
