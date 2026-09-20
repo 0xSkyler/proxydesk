@@ -59,6 +59,13 @@ const IPC_CHANNELS = {
   proxyAssignmentsChanged: 'proxy:assignmentsChanged',
   proxyReloadProgress: 'proxy:reloadProgress',
 
+  automationGetState: 'automation:getState',
+  automationStart: 'automation:start',
+  automationStop: 'automation:stop',
+  automationRunNow: 'automation:runNow',
+  automationStateChanged: 'automation:stateChanged',
+  automationSeoResult: 'automation:seoResult',
+
   settingsGet: 'settings:get',
   settingsUpdate: 'settings:update',
   settingsReset: 'settings:reset',
@@ -118,6 +125,22 @@ const api: AppApi = {
       const listener = (_e: Electron.IpcRendererEvent, progress: Parameters<typeof cb>[0]) => cb(progress);
       ipcRenderer.on(IPC_CHANNELS.proxyReloadProgress, listener);
       return () => ipcRenderer.removeListener(IPC_CHANNELS.proxyReloadProgress, listener);
+    }
+  },
+  automation: {
+    getState: () => ipcRenderer.invoke(IPC_CHANNELS.automationGetState),
+    start: (config) => ipcRenderer.invoke(IPC_CHANNELS.automationStart, config),
+    stop: () => ipcRenderer.invoke(IPC_CHANNELS.automationStop),
+    runNow: () => ipcRenderer.invoke(IPC_CHANNELS.automationRunNow),
+    onStateChanged: (cb) => {
+      const listener = (_e: Electron.IpcRendererEvent, state: Parameters<typeof cb>[0]) => cb(state);
+      ipcRenderer.on(IPC_CHANNELS.automationStateChanged, listener);
+      return () => ipcRenderer.removeListener(IPC_CHANNELS.automationStateChanged, listener);
+    },
+    onSeoResult: (cb) => {
+      const listener = (_e: Electron.IpcRendererEvent, payload: Parameters<typeof cb>[0]) => cb(payload);
+      ipcRenderer.on(IPC_CHANNELS.automationSeoResult, listener);
+      return () => ipcRenderer.removeListener(IPC_CHANNELS.automationSeoResult, listener);
     }
   },
   settings: {
