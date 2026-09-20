@@ -171,9 +171,9 @@ export function Settings(): JSX.Element {
           Auto-replace proxies blocked by Google (CAPTCHA)
         </label>
         <p className="muted">
-          When a browser hits Google&rsquo;s &ldquo;unusual traffic&rdquo; / CAPTCHA page while browsing normally,
-          turning this on swaps in a different proxy and retries the page automatically (up to 3 tries in a row
-          before giving up and leaving it for a manual &ldquo;Change Proxy&rdquo; click).
+          During normal manual browsing, this can swap a failed/blocked proxy and retry up to 3 times. During
+          Autonomous SEO, Google challenge pages are only reported for that cycle; the app waits for the next
+          scheduled rotation instead of immediately changing proxies in response to the challenge.
         </p>
         <label className="checkbox-label">
           <input
