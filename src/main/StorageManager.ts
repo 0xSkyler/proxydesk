@@ -56,6 +56,18 @@ export class StorageManager {
     await fs.rename(tmpPath, finalPath);
   }
 
+  /** Removes one persisted value and its in-memory cache entry. */
+  async remove(key: string): Promise<void> {
+    this.cache.delete(key);
+    try {
+      await fs.unlink(this.fileFor(key));
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+        logger.warn('storage', `Failed to remove ${key}: ${(err as Error).message}`);
+      }
+    }
+  }
+
   /** Encrypts a secret (e.g. a proxy password) using the OS keychain via Electron's safeStorage,
    *  falling back to a clearly-marked reversible encoding only when OS encryption is unavailable
    *  (e.g. some Linux CI environments without a keyring). */
