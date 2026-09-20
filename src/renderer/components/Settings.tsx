@@ -77,14 +77,10 @@ export function Settings(): JSX.Element {
             onChange={(e) => void apply({ browser: { ...settings.browser, tileMinHeight: Number(e.target.value) } })}
           />
         </label>
-        <label className="checkbox-label">
-          <input
-            type="checkbox"
-            checked={settings.browser.persistSessions}
-            onChange={(e) => void apply({ browser: { ...settings.browser, persistSessions: e.target.checked } })}
-          />
-          Persist browser sessions
-        </label>
+        <p className="muted" style={{ marginTop: -6, marginBottom: 0 }}>
+          Browser sessions are always temporary. Cookies, cache, local/site storage and prior browsing state are
+          cleared when ProxyDesk closes; persistent browser sessions are disabled.
+        </p>
         <label>
           Start page
           <input
@@ -140,10 +136,10 @@ export function Settings(): JSX.Element {
           Follow safe same-site content links during Keep Alive
         </label>
         <label>
-          Maximum page hops per Keep Alive run (0-1000)
+          Central Keep Alive content limit (1-1000 pages per browser)
           <input
             type="number"
-            min={0}
+            min={1}
             max={1000}
             value={settings.browser.keepAliveMaxHops}
             onChange={(e) =>
@@ -152,8 +148,9 @@ export function Settings(): JSX.Element {
           />
         </label>
         <p className="muted" style={{ marginTop: -6, marginBottom: 0 }}>
-          Keep Alive uses randomized scrolling. Link hopping only considers visible same-site HTTP(S) links and
-          excludes login, account, cart, checkout, payment, download, admin and destructive paths.
+          Each page is slowly scrolled from top to bottom and back to top 6-8 times before Keep Alive follows a
+          different same-site content link. The central limit above applies to every browser. Login, account, cart,
+          checkout, payment, download, admin and destructive links are excluded.
         </p>
         <label>
           SEO tracker: maximum Google result pages
@@ -171,14 +168,10 @@ export function Settings(): JSX.Element {
 
       <section>
         <h3>Proxy</h3>
-        <label className="checkbox-label">
-          <input
-            type="checkbox"
-            checked={settings.proxy.autoLoadOnStartup}
-            onChange={(e) => void apply({ proxy: { ...settings.proxy, autoLoadOnStartup: e.target.checked } })}
-          />
-          Auto-load proxies on startup
-        </label>
+        <p className="muted">
+          Proxy lists are session-only. ProxyDesk starts with an empty pool every time; upload/paste your proxy.txt
+          for the current run. Importing a new list replaces the previous runtime pool.
+        </p>
         <label className="checkbox-label">
           <input
             type="checkbox"
