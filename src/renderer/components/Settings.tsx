@@ -115,22 +115,58 @@ export function Settings(): JSX.Element {
             checked={settings.browser.keepAliveEnabled}
             onChange={(e) => void apply({ browser: { ...settings.browser, keepAliveEnabled: e.target.checked } })}
           />
-          Keep sessions alive while away (tiny periodic auto-scroll so sites don&rsquo;t treat the tab as idle)
+          Enable enhanced Keep Alive on all browsers
         </label>
-        {settings.browser.keepAliveEnabled && (
-          <label>
-            Keep-alive interval (seconds)
-            <input
-              type="number"
-              min={10}
-              max={3600}
-              value={settings.browser.keepAliveIntervalSec}
-              onChange={(e) =>
-                void apply({ browser: { ...settings.browser, keepAliveIntervalSec: Number(e.target.value) } })
-              }
-            />
-          </label>
-        )}
+        <label>
+          Keep-alive interval (seconds)
+          <input
+            type="number"
+            min={5}
+            max={3600}
+            value={settings.browser.keepAliveIntervalSec}
+            onChange={(e) =>
+              void apply({ browser: { ...settings.browser, keepAliveIntervalSec: Number(e.target.value) } })
+            }
+          />
+        </label>
+        <label className="checkbox-label">
+          <input
+            type="checkbox"
+            checked={settings.browser.keepAliveFollowLinks}
+            onChange={(e) =>
+              void apply({ browser: { ...settings.browser, keepAliveFollowLinks: e.target.checked } })
+            }
+          />
+          Follow safe same-site content links during Keep Alive
+        </label>
+        <label>
+          Maximum page hops per Keep Alive run (0-1000)
+          <input
+            type="number"
+            min={0}
+            max={1000}
+            value={settings.browser.keepAliveMaxHops}
+            onChange={(e) =>
+              void apply({ browser: { ...settings.browser, keepAliveMaxHops: Number(e.target.value) } })
+            }
+          />
+        </label>
+        <p className="muted" style={{ marginTop: -6, marginBottom: 0 }}>
+          Keep Alive uses randomized scrolling. Link hopping only considers visible same-site HTTP(S) links and
+          excludes login, account, cart, checkout, payment, download, admin and destructive paths.
+        </p>
+        <label>
+          SEO tracker: maximum Google result pages
+          <input
+            type="number"
+            min={1}
+            max={10}
+            value={settings.browser.seoMaxPages}
+            onChange={(e) =>
+              void apply({ browser: { ...settings.browser, seoMaxPages: Number(e.target.value) } })
+            }
+          />
+        </label>
       </section>
 
       <section>
@@ -209,23 +245,34 @@ export function Settings(): JSX.Element {
             onChange={(e) => void apply({ proxy: { ...settings.proxy, ipCheckUrl: e.target.value } })}
           />
         </label>
-        <label>
-          Proxy rotation
-          <select
-            value={settings.proxy.rotationInterval}
+        <label className="checkbox-label">
+          <input
+            type="checkbox"
+            checked={settings.proxy.autoRotationEnabled}
             onChange={(e) =>
-              void apply({
-                proxy: { ...settings.proxy, rotationInterval: e.target.value as typeof settings.proxy.rotationInterval }
-              })
+              void apply({ proxy: { ...settings.proxy, autoRotationEnabled: e.target.checked } })
             }
-          >
-            <option value="off">Off</option>
-            <option value="10m">Every 10 minutes</option>
-            <option value="30m">Every 30 minutes</option>
-            <option value="60m">Every 60 minutes</option>
-            <option value="manual">Manual only</option>
-          </select>
+          />
+          Auto-rotate assigned proxies
         </label>
+        {settings.proxy.autoRotationEnabled && (
+          <label>
+            Proxy rotation interval (seconds)
+            <input
+              type="number"
+              min={5}
+              max={86400}
+              value={settings.proxy.rotationIntervalSec}
+              onChange={(e) =>
+                void apply({ proxy: { ...settings.proxy, rotationIntervalSec: Number(e.target.value) } })
+              }
+            />
+          </label>
+        )}
+        <p className="muted">
+          Timed rotation reassigns from the existing proxy pool without running a complete validation sweep on
+          every tick. Values below 5 seconds are clamped to 5 seconds.
+        </p>
       </section>
 
       <section>
