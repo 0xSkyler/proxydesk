@@ -47,11 +47,14 @@ export interface AppApi {
     checkIp(id: number): Promise<IpCheckResult>;
     checkAllIps(): Promise<IpCheckResult[]>;
     restart(id: number): Promise<void>;
-    broadcastSearch(ids: number[], query: string, matchText: string): Promise<BroadcastSearchResult[]>;
+    broadcastSearch(ids: number[], query: string, targetWebsite: string): Promise<BroadcastSearchResult[]>;
+    setKeepAlive(id: number, enabled: boolean): Promise<void>;
+    setKeepAliveAll(enabled: boolean): Promise<void>;
     onStateChanged(cb: (state: BrowserState) => void): () => void;
   };
   proxy: {
     reload(countryCode: string | null): Promise<ReloadProxiesSummary>;
+    rotateNow(countryCode: string | null): Promise<ReloadProxiesSummary>;
     getAll(): Promise<ProxyRecord[]>;
     assign(browserId: number, proxyId: string | null): Promise<void>;
     replaceFailed(browserId: number): Promise<ProxyRecord | null>;
@@ -96,9 +99,12 @@ export const IPC_CHANNELS = {
   browserCheckAllIps: 'browser:checkAllIps',
   browserRestart: 'browser:restart',
   browserBroadcastSearch: 'browser:broadcastSearch',
+  browserSetKeepAlive: 'browser:setKeepAlive',
+  browserSetKeepAliveAll: 'browser:setKeepAliveAll',
   browserStateChanged: 'browser:stateChanged',
 
   proxyReload: 'proxy:reload',
+  proxyRotateNow: 'proxy:rotateNow',
   proxyGetAll: 'proxy:getAll',
   proxyAssign: 'proxy:assign',
   proxyReplaceFailed: 'proxy:replaceFailed',
