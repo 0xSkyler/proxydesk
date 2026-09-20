@@ -74,6 +74,9 @@ export function registerIpc(deps: IpcDeps): void {
   );
 
   ipcMain.handle(IPC_CHANNELS.proxyReload, async (_e, countryCode: string | null) => {
+    if (automationManager.isRunning()) {
+      throw new Error('Stop Autonomous SEO before running a manual proxy assignment.');
+    }
     const summary = await proxyManager.reload(getBrowserIds(), countryCode);
     // reload() only updates ProxyManager's own bookkeeping — it does not
     // touch each browser's actual Electron session. Without this loop, the
@@ -87,6 +90,9 @@ export function registerIpc(deps: IpcDeps): void {
     return summary;
   });
   ipcMain.handle(IPC_CHANNELS.proxyRotateNow, async (_e, countryCode: string | null) => {
+    if (automationManager.isRunning()) {
+      throw new Error('Use Run Cycle Now or stop Autonomous SEO before manual rotation.');
+    }
     const summary = await proxyManager.rotate(getBrowserIds(), countryCode);
     for (const assignment of summary.assignments) {
       await browserManager.assignProxy(assignment.browserId, assignment.proxy);
@@ -110,6 +116,9 @@ export function registerIpc(deps: IpcDeps): void {
   ipcMain.handle(IPC_CHANNELS.proxyCheckGoogleTrust, (_e, proxyId: string) => proxyManager.checkGoogleTrustFor(proxyId));
   ipcMain.handle(IPC_CHANNELS.proxyCheckGoogleTrustForWorking, () => proxyManager.checkGoogleTrustForWorking());
   ipcMain.handle(IPC_CHANNELS.proxyImportText, async (_e, text: string) => {
+    if (automationManager.isRunning()) {
+      throw new Error('Stop Autonomous SEO before replacing the manual proxy pool.');
+    }
     const result = await proxyManager.importText(text);
     // A new import replaces the old runtime pool, so stop using any proxy
     // from the previous list immediately.
@@ -117,6 +126,9 @@ export function registerIpc(deps: IpcDeps): void {
     return result;
   });
   ipcMain.handle(IPC_CHANNELS.proxyImportFile, async (_e, filePath: string) => {
+    if (automationManager.isRunning()) {
+      throw new Error('Stop Autonomous SEO before replacing the manual proxy pool.');
+    }
     const result = await proxyManager.importFile(filePath);
     for (const id of getBrowserIds()) await browserManager.assignProxy(id, null);
     return result;
