@@ -1,6 +1,7 @@
 import type { BrowserState, BrowserBounds, BroadcastSearchResult } from './browser';
 import type { ProxyRecord, ProxyImportResult, ReloadProgress, ReloadProxiesSummary } from './proxy';
 import type { AppSettings } from './settings';
+import type { SeoAutomationConfig, SeoAutomationResult, SeoAutomationState } from './automation';
 
 /**
  * Typed IPC contract. This is the ONLY surface exposed to the renderer via
@@ -68,6 +69,14 @@ export interface AppApi {
     onAssignmentsChanged(cb: (summary: ReloadProxiesSummary) => void): () => void;
     onReloadProgress(cb: (progress: ReloadProgress) => void): () => void;
   };
+  automation: {
+    getState(): Promise<SeoAutomationState>;
+    start(config: SeoAutomationConfig): Promise<SeoAutomationState>;
+    stop(): Promise<SeoAutomationState>;
+    runNow(): Promise<SeoAutomationState>;
+    onStateChanged(cb: (state: SeoAutomationState) => void): () => void;
+    onSeoResult(cb: (payload: SeoAutomationResult) => void): () => void;
+  };
   settings: {
     get(): Promise<AppSettings>;
     update(partial: Partial<AppSettings>): Promise<AppSettings>;
@@ -117,6 +126,13 @@ export const IPC_CHANNELS = {
   proxyExport: 'proxy:export',
   proxyAssignmentsChanged: 'proxy:assignmentsChanged',
   proxyReloadProgress: 'proxy:reloadProgress',
+
+  automationGetState: 'automation:getState',
+  automationStart: 'automation:start',
+  automationStop: 'automation:stop',
+  automationRunNow: 'automation:runNow',
+  automationStateChanged: 'automation:stateChanged',
+  automationSeoResult: 'automation:seoResult',
 
   settingsGet: 'settings:get',
   settingsUpdate: 'settings:update',
