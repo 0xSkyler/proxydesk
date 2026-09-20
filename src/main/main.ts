@@ -4,6 +4,7 @@ import { BrowserManager } from './BrowserManager';
 import { ProxyManager } from './ProxyManager';
 import { SettingsManager } from './SettingsManager';
 import { StorageManager } from './StorageManager';
+import { SeoAutomationManager } from './SeoAutomationManager';
 import { registerIpc } from './ipc/registerIpc';
 import { logger } from './Logger';
 import { BROWSER_IDS } from '../shared/types/browser';
@@ -15,6 +16,7 @@ let browserManager: BrowserManager;
 let proxyManager: ProxyManager;
 let settingsManager: SettingsManager;
 let storageManager: StorageManager;
+let automationManager: SeoAutomationManager;
 let rotationTimer: NodeJS.Timeout | null = null;
 
 // TOOLBAR_HEIGHT/SIDEBAR values mirror the renderer's CSS layout constants
@@ -77,6 +79,12 @@ async function bootstrap(): Promise<void> {
   await proxyManager.init();
 
   browserManager = new BrowserManager();
+  automationManager = new SeoAutomationManager(
+    proxyManager,
+    browserManager,
+    settingsManager,
+    () => BROWSER_IDS.slice(0, settingsManager.get().browser.browserCount)
+  );
   // Remove browser cookies/cache/site storage left by any older persistent
   // build for every possible workspace id before this run starts.
   await browserManager.purgeLegacyPersistentSessions(BROWSER_IDS);
@@ -87,6 +95,7 @@ async function bootstrap(): Promise<void> {
     browserManager,
     proxyManager,
     settingsManager,
+    automationManager,
     getBrowserIds: () => BROWSER_IDS.slice(0, settingsManager.get().browser.browserCount)
   });
 
@@ -155,7 +164,7 @@ function scheduleProxyRotation(): void {
   }
 
   const proxySettings = settingsManager.get().proxy;
-  if (!proxySettings.autoRotationEnabled) return;
+  if (!proxySettings.autoRotationEnabled || automationManager?.isRunning()) return;
 
   const seconds = Math.max(5, Math.min(86400, Math.floor(proxySettings.rotationIntervalSec || 60)));
   rotationTimer = setInterval(() => void runProxyRotation(), seconds * 1000);
@@ -163,6 +172,7 @@ function scheduleProxyRotation(): void {
 }
 
 async function runProxyRotation(): Promise<void> {
+  if (automationManager?.isRunning()) return;
   const settings = settingsManager.get();
   const browserIds = BROWSER_IDS.slice(0, settings.browser.browserCount);
   try {
@@ -230,18 +240,31 @@ async function syncBrowserCount(settings: ReturnType<SettingsManager['get']>): P
  */
 async function handleGoogleBlocked(browserId: number, continueUrl: string): Promise<void> {
   const settings = settingsManager.get();
-  if (!settings.proxy.autoReplaceFailed) return;
 
   try {
     await proxyManager.markGoogleBlocked(browserId);
+
+    // During autonomous SEO mode, a Google challenge ends that browser's
+    // current SEO attempt. We do not immediately swap proxies in response
+    // to the challenge; the normal user-configured rotation cycle will
+    // choose the next validated proxy on schedule.
+    if (automationManager?.isRunning()) {
+      browserManager.setBrowserKeepAlive(browserId, false, false);
+      logger.warn(
+        'proxy',
+        `Browser ${browserId}: Google challenge observed during autonomous SEO. Waiting for the next scheduled rotation cycle.`
+      );
+      void continueUrl;
+      return;
+    }
+
+    if (!settings.proxy.autoReplaceFailed) return;
+
     const newProxy = await proxyManager.replaceFailed(browserId);
     if (!newProxy) {
       logger.warn('proxy', `Browser ${browserId}: no alternative proxy available after a Google CAPTCHA block.`);
       return;
     }
-    // assignProxy() reloads whatever page the browser is currently on —
-    // that's the CAPTCHA interstitial itself right now — so follow it with
-    // an explicit navigate() back to the page that was actually wanted.
     await browserManager.assignProxy(browserId, newProxy);
     await browserManager.navigate(browserId, continueUrl);
     logger.info(
@@ -249,7 +272,7 @@ async function handleGoogleBlocked(browserId: number, continueUrl: string): Prom
       `Browser ${browserId}: swapped to ${newProxy.host}:${newProxy.port} after a Google CAPTCHA block and retried.`
     );
   } catch (err) {
-    logger.warn('proxy', `Browser ${browserId}: failed to auto-recover from a Google CAPTCHA block: ${(err as Error).message}`);
+    logger.warn('proxy', `Browser ${browserId}: failed to handle a Google CAPTCHA block: ${(err as Error).message}`);
   }
 }
 
@@ -274,6 +297,7 @@ app.on('window-all-closed', () => {
 
 app.on('before-quit', () => {
   if (rotationTimer) clearInterval(rotationTimer);
+  automationManager?.stop();
   void browserManager?.destroyAll();
 });
 
