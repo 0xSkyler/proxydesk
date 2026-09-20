@@ -25,7 +25,6 @@ export declare interface ProxyManager {
 // eslint-disable-next-line @typescript-eslint/no-unsafe-declaration-merging -- standard Node EventEmitter typed-events pattern
 export class ProxyManager extends EventEmitter {
   private allProxies = new Map<string, ProxyRecord>();
-  private importedProxies: ProxyRecord[] = [];
   private assignments = new Map<number, ProxyRecord | null>();
   private currentReloadController: AbortController | null = null;
   private rotationOffset = 0;
@@ -46,7 +45,6 @@ export class ProxyManager extends EventEmitter {
       this.storage.remove(ASSIGNMENTS_KEY)
     ]);
     this.allProxies.clear();
-    this.importedProxies = [];
     this.assignments.clear();
     logger.info('proxy', 'ProxyManager initialized with an empty session-only proxy pool.');
   }
@@ -338,7 +336,6 @@ export class ProxyManager extends EventEmitter {
     // Every import replaces the current runtime pool. This guarantees that
     // only proxies from the most recently uploaded/pasted list are eligible.
     this.allProxies.clear();
-    this.importedProxies = replacement;
     this.assignments.clear();
     for (const proxy of replacement) this.allProxies.set(proxy.id, proxy);
 
