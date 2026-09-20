@@ -94,8 +94,9 @@ export function registerIpc(deps: IpcDeps): void {
   ipcMain.handle(IPC_CHANNELS.proxyGetAll, () => proxyManager.getAll());
   ipcMain.handle(IPC_CHANNELS.proxyAssign, async (_e, browserId: number, proxyId: string | null) => {
     await proxyManager.assign(browserId, proxyId);
-    const proxy = proxyId ? proxyManager.getAll().find((p) => p.id === proxyId) ?? null : null;
-    await browserManager.assignProxy(browserId, proxy);
+    // Use the in-memory assignment rather than the redacted list so
+    // authenticated proxies retain their real credentials in the session.
+    await browserManager.assignProxy(browserId, proxyManager.getAssignment(browserId));
   });
   ipcMain.handle(IPC_CHANNELS.proxyReplaceFailed, async (_e, browserId: number) => {
     const proxy = await proxyManager.replaceFailed(browserId);
@@ -106,8 +107,18 @@ export function registerIpc(deps: IpcDeps): void {
   ipcMain.handle(IPC_CHANNELS.proxyValidateAll, () => proxyManager.validateAll());
   ipcMain.handle(IPC_CHANNELS.proxyCheckGoogleTrust, (_e, proxyId: string) => proxyManager.checkGoogleTrustFor(proxyId));
   ipcMain.handle(IPC_CHANNELS.proxyCheckGoogleTrustForWorking, () => proxyManager.checkGoogleTrustForWorking());
-  ipcMain.handle(IPC_CHANNELS.proxyImportText, (_e, text: string) => proxyManager.importText(text));
-  ipcMain.handle(IPC_CHANNELS.proxyImportFile, (_e, filePath: string) => proxyManager.importFile(filePath));
+  ipcMain.handle(IPC_CHANNELS.proxyImportText, async (_e, text: string) => {
+    const result = await proxyManager.importText(text);
+    // A new import replaces the old runtime pool, so stop using any proxy
+    // from the previous list immediately.
+    for (const id of getBrowserIds()) await browserManager.assignProxy(id, null);
+    return result;
+  });
+  ipcMain.handle(IPC_CHANNELS.proxyImportFile, async (_e, filePath: string) => {
+    const result = await proxyManager.importFile(filePath);
+    for (const id of getBrowserIds()) await browserManager.assignProxy(id, null);
+    return result;
+  });
   ipcMain.handle(IPC_CHANNELS.proxyExport, (_e, format: 'txt' | 'csv' | 'json') => proxyManager.exportProxies(format));
 
   ipcMain.handle(IPC_CHANNELS.settingsGet, () => settingsManager.get());
