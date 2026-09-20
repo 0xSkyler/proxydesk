@@ -38,23 +38,17 @@ export class ProxyManager extends EventEmitter {
   }
 
   async init(): Promise<void> {
-    const storedProxies = await this.storage.read<ProxyRecord[]>(PROXIES_KEY, []);
-    for (const p of storedProxies) this.allProxies.set(p.id, this.normalizeLoaded(this.decryptCredentials(p)));
-
-    this.importedProxies = (await this.storage.read<ProxyRecord[]>(IMPORTED_KEY, [])).map((p) =>
-      this.normalizeLoaded(p)
-    );
-    for (const p of this.importedProxies) this.allProxies.set(p.id, this.decryptCredentials(p));
-
-    const storedAssignments = await this.storage.read<Array<{ browserId: number; proxyId: string | null }>>(
-      ASSIGNMENTS_KEY,
-      []
-    );
-    for (const a of storedAssignments) {
-      this.assignments.set(a.browserId, a.proxyId ? this.allProxies.get(a.proxyId) ?? null : null);
-    }
-
-    logger.info('proxy', `ProxyManager initialized with ${this.allProxies.size} known proxies.`);
+    // Proxy state is intentionally session-only. Purge any files written by
+    // older builds so a restart always begins with an empty proxy pool.
+    await Promise.all([
+      this.storage.remove(PROXIES_KEY),
+      this.storage.remove(IMPORTED_KEY),
+      this.storage.remove(ASSIGNMENTS_KEY)
+    ]);
+    this.allProxies.clear();
+    this.importedProxies = [];
+    this.assignments.clear();
+    logger.info('proxy', 'ProxyManager initialized with an empty session-only proxy pool.');
   }
 
   getAll(): ProxyRecord[] {
@@ -339,17 +333,21 @@ export class ProxyManager extends EventEmitter {
 
   async importText(text: string): Promise<ProxyImportResult> {
     const { proxies, invalidLines } = parseBulkText(text, 'Imported');
-    const merged = dedupeProxies([...this.importedProxies, ...proxies]);
-    this.importedProxies = merged;
-    for (const p of merged) this.allProxies.set(p.id, p);
-    await this.persist();
+    const replacement = dedupeProxies(proxies);
+
+    // Every import replaces the current runtime pool. This guarantees that
+    // only proxies from the most recently uploaded/pasted list are eligible.
+    this.allProxies.clear();
+    this.importedProxies = replacement;
+    this.assignments.clear();
+    for (const proxy of replacement) this.allProxies.set(proxy.id, proxy);
 
     return {
       imported: proxies.length + invalidLines.length,
-      valid: proxies.length,
+      valid: replacement.length,
       invalid: invalidLines.length,
       invalidLines,
-      proxies
+      proxies: replacement
     };
   }
 
@@ -374,37 +372,8 @@ export class ProxyManager extends EventEmitter {
   }
 
   private async persist(): Promise<void> {
-    const encrypted = Array.from(this.allProxies.values()).map((p) => this.encryptCredentials(p));
-    await this.storage.write(PROXIES_KEY, encrypted);
-    await this.storage.write(IMPORTED_KEY, this.importedProxies.map((p) => this.encryptCredentials(p)));
-    await this.storage.write(
-      ASSIGNMENTS_KEY,
-      Array.from(this.assignments.entries()).map(([browserId, proxy]) => ({
-        browserId,
-        proxyId: proxy?.id ?? null
-      }))
-    );
-  }
-
-  private encryptCredentials(proxy: ProxyRecord): ProxyRecord {
-    if (!proxy.password) return proxy;
-    return { ...proxy, password: this.storage.encryptSecret(proxy.password) };
-  }
-
-  /** Records saved before the Google-trust-check feature existed won't have
-   * `googleStatus` in their persisted JSON — fill it in on load so the UI
-   * and scorer never see `undefined` there. */
-  private normalizeLoaded(proxy: ProxyRecord): ProxyRecord {
-    return proxy.googleStatus ? proxy : { ...proxy, googleStatus: 'unknown' };
-  }
-
-  private decryptCredentials(proxy: ProxyRecord): ProxyRecord {
-    if (!proxy.password) return proxy;
-    try {
-      return { ...proxy, password: this.storage.decryptSecret(proxy.password) };
-    } catch {
-      return { ...proxy, password: undefined };
-    }
+    // Deliberately no-op: proxy pool, credentials, assignments and usage
+    // history live only in memory for the lifetime of this app process.
   }
 }
 
