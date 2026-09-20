@@ -125,16 +125,6 @@ export function Settings(): JSX.Element {
             }
           />
         </label>
-        <label className="checkbox-label">
-          <input
-            type="checkbox"
-            checked={settings.browser.keepAliveFollowLinks}
-            onChange={(e) =>
-              void apply({ browser: { ...settings.browser, keepAliveFollowLinks: e.target.checked } })
-            }
-          />
-          Follow safe same-site content links during Keep Alive
-        </label>
         <label>
           Central Keep Alive content limit (1-1000 pages per browser)
           <input
