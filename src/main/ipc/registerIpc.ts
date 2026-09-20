@@ -5,12 +5,14 @@ import type { BrowserBounds } from '../../shared/types/browser';
 import type { BrowserManager } from '../BrowserManager';
 import type { ProxyManager } from '../ProxyManager';
 import type { SettingsManager } from '../SettingsManager';
+import type { SeoAutomationManager } from '../SeoAutomationManager';
 import { logger } from '../Logger';
 
 export interface IpcDeps {
   browserManager: BrowserManager;
   proxyManager: ProxyManager;
   settingsManager: SettingsManager;
+  automationManager: SeoAutomationManager;
   getBrowserIds: () => number[];
 }
 
@@ -22,7 +24,7 @@ export interface IpcDeps {
  * request/response and event channels.
  */
 export function registerIpc(deps: IpcDeps): void {
-  const { browserManager, proxyManager, settingsManager, getBrowserIds } = deps;
+  const { browserManager, proxyManager, settingsManager, automationManager, getBrowserIds } = deps;
 
   ipcMain.handle(IPC_CHANNELS.browserGetAll, () => browserManager.getAll());
   ipcMain.handle(IPC_CHANNELS.browserNavigate, (_e, id: number, url: string) => browserManager.navigate(id, url));
@@ -121,6 +123,11 @@ export function registerIpc(deps: IpcDeps): void {
   });
   ipcMain.handle(IPC_CHANNELS.proxyExport, (_e, format: 'txt' | 'csv' | 'json') => proxyManager.exportProxies(format));
 
+  ipcMain.handle(IPC_CHANNELS.automationGetState, () => automationManager.getState());
+  ipcMain.handle(IPC_CHANNELS.automationStart, (_e, config) => automationManager.start(config));
+  ipcMain.handle(IPC_CHANNELS.automationStop, () => automationManager.stop());
+  ipcMain.handle(IPC_CHANNELS.automationRunNow, () => automationManager.runNow());
+
   ipcMain.handle(IPC_CHANNELS.settingsGet, () => settingsManager.get());
   ipcMain.handle(IPC_CHANNELS.settingsUpdate, (_e, partial) => settingsManager.update(partial));
   ipcMain.handle(IPC_CHANNELS.settingsReset, () => settingsManager.reset());
@@ -166,6 +173,18 @@ export function registerIpc(deps: IpcDeps): void {
   proxyManager.on('reloadProgress', (progress) => {
     for (const win of BrowserWindow.getAllWindows()) {
       win.webContents.send(IPC_CHANNELS.proxyReloadProgress, progress);
+    }
+  });
+
+  automationManager.on('stateChanged', (state) => {
+    for (const win of BrowserWindow.getAllWindows()) {
+      win.webContents.send(IPC_CHANNELS.automationStateChanged, state);
+    }
+  });
+
+  automationManager.on('seoResult', (payload) => {
+    for (const win of BrowserWindow.getAllWindows()) {
+      win.webContents.send(IPC_CHANNELS.automationSeoResult, payload);
     }
   });
 }
