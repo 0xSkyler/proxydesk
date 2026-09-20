@@ -85,6 +85,7 @@ interface ManagedBrowser {
   keepAliveHops: number;
   keepAliveNextAt: number;
   keepAliveBusy: boolean;
+  keepAliveVisited: Set<string>;
 }
 
 /**
@@ -156,12 +157,23 @@ export class BrowserManager extends EventEmitter {
     });
   }
 
-  private partitionFor(id: number, persist: boolean): string {
-    return persist ? `${PARTITION_PREFIX}${id}` : `${EPHEMERAL_PARTITION_PREFIX}${id}-${process.pid}`;
+  private partitionFor(id: number, _persist: boolean): string {
+    // Browser site data is always session-only. A new process gets a fresh
+    // in-memory partition regardless of the legacy persistSessions setting.
+    return `${EPHEMERAL_PARTITION_PREFIX}${id}-${process.pid}`;
+  }
+
+  private async clearLegacyPersistentPartition(id: number): Promise<void> {
+    const legacy = session.fromPartition(`${PARTITION_PREFIX}${id}`, { cache: true });
+    await Promise.allSettled([legacy.clearStorageData(), legacy.clearCache()]);
   }
 
   async createBrowser(id: number, options: BrowserManagerOptions): Promise<void> {
     if (this.browsers.has(id)) return;
+
+    // Remove cookies/cache/local storage left by older persistent builds
+    // before creating this run's in-memory browser.
+    await this.clearLegacyPersistentPartition(id);
 
     const partition = this.partitionFor(id, options.persistSessions);
     const ses = session.fromPartition(partition, { cache: true });
@@ -201,7 +213,8 @@ export class BrowserManager extends EventEmitter {
       keepAliveEnabled: false,
       keepAliveHops: 0,
       keepAliveNextAt: Date.now() + this.keepAliveIntervalMs,
-      keepAliveBusy: false
+      keepAliveBusy: false,
+      keepAliveVisited: new Set<string>()
     };
     this.browsers.set(id, managed);
     this.wireEvents(managed, options);
@@ -509,52 +522,59 @@ export class BrowserManager extends EventEmitter {
         };
       }
 
-      await delay(1400);
+      // Slow proxies can visibly paint the first page before all result
+      // links are queryable. Poll the SAME page for up to 10 seconds and
+      // only paginate after the target still cannot be found.
+      const scanDeadline = Date.now() + 10_000;
+      let latestScan: GoogleResultScan = { blocked: false, ready: false, resultsScanned: 0 };
+      let pageMaxScanned = 0;
 
-      let extracted: ExtractedSearchPage;
-      try {
-        extracted = (await wc.executeJavaScript(EXTRACT_GOOGLE_RESULTS_SCRIPT)) as ExtractedSearchPage;
-      } catch (err) {
-        return {
-          browserId: id,
-          status: 'error',
-          error: `Failed to read Google results: ${(err as Error).message}`,
-          ranAt
-        };
+      while (Date.now() < scanDeadline) {
+        try {
+          latestScan = (await wc.executeJavaScript(buildGoogleResultScanScript(targetHost))) as GoogleResultScan;
+        } catch (err) {
+          return {
+            browserId: id,
+            status: 'error',
+            error: `Failed to read Google results: ${(err as Error).message}`,
+            ranAt
+          };
+        }
+
+        if (latestScan.blocked) {
+          return {
+            browserId: id,
+            status: 'blocked',
+            landedUrl: wc.getURL(),
+            resultsScanned: totalScanned + pageMaxScanned,
+            ranAt
+          };
+        }
+
+        pageMaxScanned = Math.max(pageMaxScanned, latestScan.resultsScanned);
+        if (latestScan.match) break;
+        await delay(latestScan.ready ? 600 : 350);
       }
 
-      if (extracted.blocked) {
-        return {
-          browserId: id,
-          status: 'blocked',
-          landedUrl: wc.getURL(),
-          resultsScanned: totalScanned,
-          ranAt
-        };
-      }
+      totalScanned += pageMaxScanned;
+      if (!latestScan.match) continue;
 
-      const results = extracted.results ?? [];
-      totalScanned += results.length;
-      const matchIndex = results.findIndex((result) => hostMatchesTarget(result.url, targetHost));
-      if (matchIndex < 0) continue;
-
-      const match = results[matchIndex];
       const clicked = (await wc
-        .executeJavaScript(buildClickGoogleResultScript(match.url), true)
+        .executeJavaScript(buildClickGoogleTargetResultScript(targetHost), true)
         .catch(() => false)) as boolean;
 
       if (!clicked) {
         return {
           browserId: id,
           status: 'error',
-          error: `Found "${match.title}" but could not click its Google result link.`,
+          error: `Found "${latestScan.match.title}" on Google page ${pageIndex + 1}, but could not click it.`,
           landedUrl: wc.getURL(),
           resultsScanned: totalScanned,
           ranAt
         };
       }
 
-      const deadline = Date.now() + 12_000;
+      const deadline = Date.now() + 15_000;
       let landedUrl = wc.getURL();
       while (Date.now() < deadline) {
         await delay(200);
@@ -566,11 +586,11 @@ export class BrowserManager extends EventEmitter {
         return {
           browserId: id,
           status: 'error',
-          error: `Google result was clicked, but the browser did not land on ${targetHost} within 12 seconds.`,
+          error: `Google result was clicked, but the browser did not land on ${targetHost} within 15 seconds.`,
           landedUrl,
-          matchedTitle: match.title,
+          matchedTitle: latestScan.match.title,
           resultsScanned: totalScanned,
-          position: pageIndex * 10 + matchIndex + 1,
+          position: pageIndex * 10 + latestScan.match.organicIndex + 1,
           resultPage: pageIndex + 1,
           ranAt
         };
@@ -581,9 +601,9 @@ export class BrowserManager extends EventEmitter {
         browserId: id,
         status: 'matched',
         landedUrl,
-        matchedTitle: match.title,
+        matchedTitle: latestScan.match.title,
         resultsScanned: totalScanned,
-        position: pageIndex * 10 + matchIndex + 1,
+        position: pageIndex * 10 + latestScan.match.organicIndex + 1,
         resultPage: pageIndex + 1,
         keepAliveStarted: true,
         ranAt
@@ -602,10 +622,17 @@ export class BrowserManager extends EventEmitter {
   async destroyBrowser(id: number): Promise<void> {
     const managed = this.browsers.get(id);
     if (!managed) return;
+
+    // Explicitly clear runtime browser data before disposal. The partition
+    // is already non-persistent, so this is defense in depth for clean exit.
+    await Promise.allSettled([
+      managed.session.clearStorageData(),
+      managed.session.clearCache(),
+      managed.session.setProxy({ mode: 'direct' })
+    ]);
+
     this.window?.removeBrowserView(managed.view);
     // @ts-expect-error — destroy() exists on the underlying WebContents at runtime
-    // across supported Electron versions but is intentionally left out of some
-    // type defs; guarded by the isDestroyed check to avoid double-free errors.
     if (!managed.view.webContents.isDestroyed()) managed.view.webContents.destroy?.();
     this.browsers.delete(id);
   }
@@ -620,7 +647,9 @@ export class BrowserManager extends EventEmitter {
 
   configureKeepAlive(intervalMs: number, maxHops: number, followLinks: boolean): void {
     this.keepAliveIntervalMs = Math.max(5_000, Math.min(3_600_000, Math.floor(intervalMs || 60_000)));
-    this.keepAliveMaxHops = Math.max(0, Math.min(1000, Math.floor(maxHops || 0)));
+    // This central value is the maximum number of content pages processed
+    // by each Keep Alive run, including the initial landing page.
+    this.keepAliveMaxHops = Math.max(1, Math.min(1000, Math.floor(maxHops || 1)));
     this.keepAliveFollowLinks = followLinks;
 
     if (!this.keepAliveTimer) {
@@ -636,7 +665,12 @@ export class BrowserManager extends EventEmitter {
   setBrowserKeepAlive(id: number, enabled: boolean, resetHops = false): void {
     const managed = this.get(id);
     managed.keepAliveEnabled = enabled;
-    if (resetHops) managed.keepAliveHops = 0;
+    if (resetHops) {
+      managed.keepAliveHops = 0;
+      managed.keepAliveVisited.clear();
+      const currentUrl = managed.view.webContents.getURL();
+      if (currentUrl) managed.keepAliveVisited.add(currentUrl);
+    }
     managed.keepAliveNextAt = Date.now() + Math.min(1000, this.keepAliveIntervalMs);
     this.updateState(managed, {
       keepAliveEnabled: enabled,
@@ -647,7 +681,12 @@ export class BrowserManager extends EventEmitter {
   setKeepAliveAll(enabled: boolean, resetHops = false): void {
     for (const managed of this.browsers.values()) {
       managed.keepAliveEnabled = enabled;
-      if (resetHops) managed.keepAliveHops = 0;
+      if (resetHops) {
+        managed.keepAliveHops = 0;
+        managed.keepAliveVisited.clear();
+        const currentUrl = managed.view.webContents.getURL();
+        if (currentUrl) managed.keepAliveVisited.add(currentUrl);
+      }
       managed.keepAliveNextAt = Date.now() + Math.min(1000, this.keepAliveIntervalMs);
       this.updateState(managed, {
         keepAliveEnabled: enabled,
@@ -668,41 +707,61 @@ export class BrowserManager extends EventEmitter {
       }
 
       managed.keepAliveBusy = true;
-      const jitter = 0.8 + Math.random() * 0.4;
-      managed.keepAliveNextAt = now + Math.round(this.keepAliveIntervalMs * jitter);
       void this.runKeepAliveAction(managed).finally(() => {
         managed.keepAliveBusy = false;
+        const jitter = 0.8 + Math.random() * 0.4;
+        managed.keepAliveNextAt = Date.now() + Math.round(this.keepAliveIntervalMs * jitter);
       });
     }
   }
 
   private async runKeepAliveAction(managed: ManagedBrowser): Promise<void> {
     const wc = managed.view.webContents;
-    const canHop =
-      this.keepAliveFollowLinks && this.keepAliveMaxHops > 0 && managed.keepAliveHops < this.keepAliveMaxHops;
+    const pagesVisited = managed.keepAliveHops + 1;
+    const canHop = this.keepAliveFollowLinks && pagesVisited < this.keepAliveMaxHops;
 
     try {
       const result = (await wc.executeJavaScript(buildKeepAliveActionScript(canHop), true)) as {
-        nextUrl?: string;
+        links?: string[];
       };
 
-      this.updateState(managed, {
-        lastKeepAliveAt: new Date().toISOString(),
-        keepAliveEnabled: true,
-        keepAliveHops: managed.keepAliveHops
-      });
+      const completedAt = new Date().toISOString();
 
-      if (canHop && result?.nextUrl) {
-        await wc.loadURL(result.nextUrl);
-        managed.keepAliveHops += 1;
+      // The current page has now completed its 6–8 full slow down/up cycles.
+      // If the central page limit is reached, stop this browser's run.
+      if (pagesVisited >= this.keepAliveMaxHops) {
+        managed.keepAliveEnabled = false;
         this.updateState(managed, {
-          keepAliveHops: managed.keepAliveHops,
-          lastKeepAliveAt: new Date().toISOString()
+          lastKeepAliveAt: completedAt,
+          keepAliveEnabled: false,
+          keepAliveHops: managed.keepAliveHops
         });
+        return;
       }
+
+      const candidates = (result.links ?? []).filter((url) => !managed.keepAliveVisited.has(url));
+      if (!canHop || candidates.length === 0) {
+        managed.keepAliveEnabled = false;
+        this.updateState(managed, {
+          lastKeepAliveAt: completedAt,
+          keepAliveEnabled: false,
+          keepAliveHops: managed.keepAliveHops
+        });
+        return;
+      }
+
+      const nextUrl = candidates[Math.floor(Math.random() * candidates.length)];
+      managed.keepAliveVisited.add(nextUrl);
+      await wc.loadURL(nextUrl);
+      managed.keepAliveHops += 1;
+      this.updateState(managed, {
+        keepAliveEnabled: true,
+        keepAliveHops: managed.keepAliveHops,
+        lastKeepAliveAt: completedAt
+      });
     } catch {
       // A navigation can make script execution temporarily unavailable.
-      // Keep Alive is best-effort and will retry on its next scheduled tick.
+      // Keep Alive retries on its next scheduled tick.
     }
   }
 }
@@ -711,45 +770,91 @@ function buildKeepAliveActionScript(allowHop: boolean): string {
   return `(async () => {
     const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
     const root = document.scrollingElement || document.documentElement;
-    const maxScroll = Math.max(0, root.scrollHeight - window.innerHeight);
+    const maxScroll = () => Math.max(0, root.scrollHeight - window.innerHeight);
 
-    if (maxScroll > 0) {
-      const current = window.scrollY;
-      const direction = Math.random() < 0.72 ? 1 : -1;
-      const distance = Math.max(180, Math.round(window.innerHeight * (0.35 + Math.random() * 0.9)));
-      const target = Math.max(0, Math.min(maxScroll, current + direction * distance));
-      window.scrollTo({ top: target, behavior: 'smooth' });
-      await wait(650 + Math.round(Math.random() * 900));
+    const animateScrollTo = (target, duration) =>
+      new Promise((resolve) => {
+        const startY = window.scrollY;
+        const delta = target - startY;
+        if (Math.abs(delta) < 2) {
+          window.scrollTo(0, target);
+          resolve();
+          return;
+        }
+
+        const started = performance.now();
+        function frame(now) {
+          const t = Math.min(1, (now - started) / duration);
+          const eased = t < 0.5
+            ? 2 * t * t
+            : 1 - Math.pow(-2 * t + 2, 2) / 2;
+          window.scrollTo(0, startY + delta * eased);
+          if (t < 1) requestAnimationFrame(frame);
+          else resolve();
+        }
+        requestAnimationFrame(frame);
+      });
+
+    const cycles = 6 + Math.floor(Math.random() * 3); // 6, 7 or 8
+    if (maxScroll() > 0) {
+      await animateScrollTo(0, 1200);
+      await wait(500);
+
+      for (let cycle = 0; cycle < cycles; cycle += 1) {
+        const downDuration = 3400 + Math.floor(Math.random() * 1600);
+        const upDuration = 3400 + Math.floor(Math.random() * 1600);
+        await animateScrollTo(maxScroll(), downDuration);
+        await wait(550 + Math.floor(Math.random() * 650));
+        await animateScrollTo(0, upDuration);
+        await wait(550 + Math.floor(Math.random() * 650));
+      }
     } else {
-      window.scrollBy(0, 1);
-      window.scrollBy(0, -1);
-      await wait(120);
+      for (let cycle = 0; cycle < cycles; cycle += 1) {
+        window.scrollBy(0, 1);
+        await wait(350);
+        window.scrollBy(0, -1);
+        await wait(350);
+      }
     }
 
-    if (!${allowHop ? 'true' : 'false'} || Math.random() > 0.35) return {};
+    if (!${allowHop ? 'true' : 'false'}) return { links: [] };
 
     const blocked = /(login|log-in|logout|sign-in|signin|signup|register|account|cart|basket|checkout|payment|subscribe|privacy|terms|contact|download|delete|remove|admin|wp-admin|wp-login)/i;
     const currentUrl = new URL(location.href);
-    const links = Array.from(document.querySelectorAll('a[href]')).filter((anchor) => {
+    const currentHost = currentUrl.hostname.toLowerCase().replace(/^www\\./, '');
+    const seen = {};
+    const links = [];
+
+    Array.from(document.querySelectorAll('a[href]')).forEach((anchor) => {
       try {
-        if (anchor.hasAttribute('download')) return false;
-        if ((anchor.getAttribute('rel') || '').toLowerCase().includes('sponsored')) return false;
+        if (anchor.hasAttribute('download')) return;
+        const rel = (anchor.getAttribute('rel') || '').toLowerCase();
+        if (rel.includes('sponsored') || rel.includes('nofollow sponsored')) return;
+
         const text = (anchor.textContent || '').trim();
-        if (text.length < 5 || blocked.test(text)) return false;
+        if (text.length < 5 || blocked.test(text)) return;
+
         const url = new URL(anchor.href, location.href);
-        if (!/^https?:$/.test(url.protocol)) return false;
-        if (url.hostname !== currentUrl.hostname) return false;
-        if (url.href === currentUrl.href || blocked.test(url.pathname + url.search)) return false;
+        if (!/^https?:$/.test(url.protocol)) return;
+
+        const host = url.hostname.toLowerCase().replace(/^www\\./, '');
+        if (host !== currentHost) return;
+        if (url.href === currentUrl.href || blocked.test(url.pathname + url.search)) return;
+
         const rect = anchor.getBoundingClientRect();
-        return rect.width > 0 && rect.height > 0;
-      } catch {
-        return false;
+        if (rect.width <= 0 || rect.height <= 0) return;
+
+        url.hash = '';
+        const normalized = url.href;
+        if (seen[normalized]) return;
+        seen[normalized] = true;
+        links.push(normalized);
+      } catch (_) {
+        // Ignore malformed/non-web anchors.
       }
     });
 
-    if (links.length === 0) return {};
-    const selected = links[Math.floor(Math.random() * links.length)];
-    return { nextUrl: selected.href };
+    return { links: links.slice(0, 100) };
   })()`;
 }
 
@@ -757,92 +862,161 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-interface ExtractedSearchPage {
+interface GoogleResultScan {
   blocked: boolean;
-  results?: Array<{ url: string; title: string; text: string }>;
-  scriptError?: string;
+  ready: boolean;
+  resultsScanned: number;
+  match?: {
+    url: string;
+    title: string;
+    organicIndex: number;
+  };
 }
 
-/**
- * Runs inside the page (via executeJavaScript), not in this process — no
- * access to Node or anything outside the DOM. Deliberately format-tolerant
- * rather than tied to today's exact Google markup: any `<a>` that wraps an
- * `<h3>` is treated as an organic result link (this has been the stable
- * shape of Google's organic result anchors for years, independent of the
- * surrounding layout classes that change often), and Google's own `/url?q=`
- * redirect wrapper is unwrapped when present. Ads, "People also ask", and
- * any other google.* links are skipped. An "unusual traffic" / consent
- * interstitial is detected up front so a blocked run is never mistaken for
- * a genuine zero-results page.
- */
-const EXTRACT_GOOGLE_RESULTS_SCRIPT = `(function() {
-  try {
-    var loc = window.location.href;
-    if (/\\/sorry\\/|consent\\.google\\./.test(loc)) return { blocked: true };
-    var bodyText = (document.body && document.body.innerText) || '';
-    if (/unusual traffic|not a robot|recaptcha/i.test(bodyText.slice(0, 2500))) return { blocked: true };
-
-    function unwrap(href) {
-      try {
-        var resolved = new URL(href, location.origin);
-        if (resolved.hostname.indexOf('google.') !== -1 && resolved.pathname === '/url') {
-          return resolved.searchParams.get('q') || resolved.searchParams.get('url') || href;
-        }
-        return resolved.href;
-      } catch (_) {
-        return href;
-      }
-    }
-
-    var anchors = Array.prototype.slice.call(document.querySelectorAll('a'));
-    var seen = {};
-    var results = [];
-    anchors.forEach(function (a) {
-      var h3 = a.querySelector('h3');
-      if (!h3) return;
-      var href = unwrap(a.getAttribute('href') || '');
-      if (!/^https?:\\/\\//.test(href)) return;
-      try {
-        if (/(^|\\.)google\\.[a-z.]+$/i.test(new URL(href).hostname)) return;
-      } catch (_) {
-        return;
-      }
-      if (seen[href]) return;
-      seen[href] = true;
-      var container = a.closest('div') || a;
-      var text = container.innerText || a.innerText || '';
-      results.push({ url: href, title: h3.innerText || '', text: text.slice(0, 500) });
-    });
-    return { blocked: false, results: results.slice(0, 20) };
-  } catch (e) {
-    return { blocked: false, results: [], scriptError: String(e) };
-  }
-})()`;
-
-function buildClickGoogleResultScript(targetUrl: string): string {
+function buildGoogleResultScanScript(targetHost: string): string {
   return `(function() {
-    var target = ${JSON.stringify(targetUrl)};
-    function unwrap(href) {
-      try {
-        var resolved = new URL(href, location.origin);
-        if (resolved.hostname.indexOf('google.') !== -1 && resolved.pathname === '/url') {
-          return resolved.searchParams.get('q') || resolved.searchParams.get('url') || href;
-        }
-        return resolved.href;
-      } catch (_) {
-        return href;
+    try {
+      var target = ${JSON.stringify(targetHost.toLowerCase().replace(/^www\\./, ''))};
+      var loc = window.location.href;
+      if (/\\/sorry\\/|consent\\.google\\./.test(loc)) {
+        return { blocked: true, ready: true, resultsScanned: 0 };
       }
-    }
 
-    var anchors = Array.prototype.slice.call(document.querySelectorAll('a'));
-    for (var i = 0; i < anchors.length; i += 1) {
-      var anchor = anchors[i];
-      if (!anchor.querySelector('h3')) continue;
-      if (unwrap(anchor.getAttribute('href') || '') !== target) continue;
-      anchor.click();
-      return true;
+      var bodyText = (document.body && document.body.innerText) || '';
+      if (/unusual traffic|not a robot|recaptcha/i.test(bodyText.slice(0, 2500))) {
+        return { blocked: true, ready: true, resultsScanned: 0 };
+      }
+
+      function unwrap(href) {
+        try {
+          var resolved = new URL(href, location.href);
+          var googleHost = /(^|\\.)google\\.[a-z.]+$/i.test(resolved.hostname);
+          if (googleHost && resolved.pathname === '/url') {
+            return resolved.searchParams.get('url') || resolved.searchParams.get('q') || href;
+          }
+          return resolved.href;
+        } catch (_) {
+          return href;
+        }
+      }
+
+      function normalizeHost(host) {
+        return String(host || '').toLowerCase().replace(/^www\\./, '').replace(/\\.$/, '');
+      }
+
+      function destinationMatches(url) {
+        try {
+          var host = normalizeHost(new URL(url, location.href).hostname);
+          return host === target || host.endsWith('.' + target);
+        } catch (_) {
+          return false;
+        }
+      }
+
+      var headings = Array.prototype.slice.call(document.querySelectorAll('h3'));
+      var anchors = [];
+      headings.forEach(function (h3) {
+        var anchor = h3.closest('a');
+        if (anchor && anchors.indexOf(anchor) === -1) anchors.push(anchor);
+      });
+
+      var resultsScanned = 0;
+      for (var i = 0; i < anchors.length; i += 1) {
+        var anchor = anchors[i];
+        var titleNode = anchor.querySelector('h3');
+        if (!titleNode) continue;
+
+        var container = anchor.parentElement && anchor.parentElement.parentElement
+          ? anchor.parentElement.parentElement
+          : anchor.parentElement || anchor;
+        var nearbyText = ((container && container.innerText) || anchor.innerText || '').slice(0, 700);
+        if (/\\bSponsored\\b/i.test(nearbyText.slice(0, 140))) continue;
+
+        var rawHref = anchor.getAttribute('href') || anchor.href || '';
+        var destination = unwrap(rawHref);
+        var displayText = nearbyText.toLowerCase().replace(/www\\./g, '');
+        var matched = destinationMatches(destination) || displayText.includes(target);
+
+        resultsScanned += 1;
+        if (matched) {
+          return {
+            blocked: false,
+            ready: true,
+            resultsScanned: resultsScanned,
+            match: {
+              url: destination,
+              title: titleNode.innerText || '',
+              organicIndex: resultsScanned - 1
+            }
+          };
+        }
+      }
+
+      return {
+        blocked: false,
+        ready: anchors.length > 0 || document.readyState === 'complete',
+        resultsScanned: resultsScanned
+      };
+    } catch (_) {
+      return { blocked: false, ready: false, resultsScanned: 0 };
     }
-    return false;
+  })()`;
+}
+
+function buildClickGoogleTargetResultScript(targetHost: string): string {
+  return `(function() {
+    try {
+      var target = ${JSON.stringify(targetHost.toLowerCase().replace(/^www\\./, ''))};
+
+      function unwrap(href) {
+        try {
+          var resolved = new URL(href, location.href);
+          var googleHost = /(^|\\.)google\\.[a-z.]+$/i.test(resolved.hostname);
+          if (googleHost && resolved.pathname === '/url') {
+            return resolved.searchParams.get('url') || resolved.searchParams.get('q') || href;
+          }
+          return resolved.href;
+        } catch (_) {
+          return href;
+        }
+      }
+
+      function normalizeHost(host) {
+        return String(host || '').toLowerCase().replace(/^www\\./, '').replace(/\\.$/, '');
+      }
+
+      function destinationMatches(url) {
+        try {
+          var host = normalizeHost(new URL(url, location.href).hostname);
+          return host === target || host.endsWith('.' + target);
+        } catch (_) {
+          return false;
+        }
+      }
+
+      var headings = Array.prototype.slice.call(document.querySelectorAll('h3'));
+      for (var i = 0; i < headings.length; i += 1) {
+        var anchor = headings[i].closest('a');
+        if (!anchor) continue;
+
+        var container = anchor.parentElement && anchor.parentElement.parentElement
+          ? anchor.parentElement.parentElement
+          : anchor.parentElement || anchor;
+        var nearbyText = ((container && container.innerText) || anchor.innerText || '').slice(0, 700);
+        if (/\\bSponsored\\b/i.test(nearbyText.slice(0, 140))) continue;
+
+        var destination = unwrap(anchor.getAttribute('href') || anchor.href || '');
+        var displayText = nearbyText.toLowerCase().replace(/www\\./g, '');
+        if (!destinationMatches(destination) && !displayText.includes(target)) continue;
+
+        anchor.scrollIntoView({ block: 'center', behavior: 'instant' });
+        anchor.click();
+        return true;
+      }
+      return false;
+    } catch (_) {
+      return false;
+    }
   })()`;
 }
 
