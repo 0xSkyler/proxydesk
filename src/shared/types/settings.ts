@@ -92,7 +92,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
     gridColumns: 2,
     gridSquareTiles: false,
     tileMinHeight: 340,
-    persistSessions: true,
+    persistSessions: false,
     startPage: 'https://example.com',
     userAgent: '',
     hardwareAcceleration: true,
@@ -103,7 +103,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
     seoMaxPages: 5
   },
   proxy: {
-    autoLoadOnStartup: true,
+    autoLoadOnStartup: false,
     autoReplaceFailed: true,
     validationEnabled: true,
     validationTimeoutMs: 6000,
