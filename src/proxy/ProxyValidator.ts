@@ -19,6 +19,9 @@ export interface ValidateManyOptions extends ValidateOptions {
    * report "checked N/total" instead of leaving the caller with no signal
    * until the entire batch resolves. */
   onProgress?: (checked: number, total: number) => void;
+  /** Called immediately when each individual result is available, before
+   * the rest of the batch finishes. */
+  onResult?: (result: ProxyValidationResult, checked: number, total: number) => void;
 }
 
 function buildAgentUrl(proxy: ProxyRecord): string {
@@ -182,6 +185,7 @@ export class ProxyValidator {
         const index = cursor++;
         results[index] = await ProxyValidator.validate(proxies[index], options);
         completed++;
+        options.onResult?.(results[index], completed, proxies.length);
         options.onProgress?.(completed, proxies.length);
       }
     }
