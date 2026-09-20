@@ -56,10 +56,20 @@ export function registerIpc(deps: IpcDeps): void {
     );
   });
 
-  ipcMain.handle(IPC_CHANNELS.browserBroadcastSearch, async (_e, ids: number[], query: string, matchText: string) => {
-    const targets = ids.length > 0 ? ids : getBrowserIds();
-    return Promise.all(targets.map((id) => browserManager.broadcastSearch(id, query, matchText)));
-  });
+  ipcMain.handle(
+    IPC_CHANNELS.browserBroadcastSearch,
+    async (_e, ids: number[], query: string, targetWebsite: string) => {
+      const targets = ids.length > 0 ? ids : getBrowserIds();
+      const maxPages = settingsManager.get().browser.seoMaxPages;
+      return Promise.all(targets.map((id) => browserManager.broadcastSearch(id, query, targetWebsite, maxPages)));
+    }
+  );
+  ipcMain.handle(IPC_CHANNELS.browserSetKeepAlive, (_e, id: number, enabled: boolean) =>
+    browserManager.setBrowserKeepAlive(id, enabled, enabled)
+  );
+  ipcMain.handle(IPC_CHANNELS.browserSetKeepAliveAll, (_e, enabled: boolean) =>
+    browserManager.setKeepAliveAll(enabled, enabled)
+  );
 
   ipcMain.handle(IPC_CHANNELS.proxyReload, async (_e, countryCode: string | null) => {
     const summary = await proxyManager.reload(getBrowserIds(), countryCode);
@@ -69,6 +79,13 @@ export function registerIpc(deps: IpcDeps): void {
     // traffic kept using whatever it had before (or none at all), which is
     // exactly the gap that made the "Assign Proxies" button not visibly do
     // anything to the browsers themselves.
+    for (const assignment of summary.assignments) {
+      await browserManager.assignProxy(assignment.browserId, assignment.proxy);
+    }
+    return summary;
+  });
+  ipcMain.handle(IPC_CHANNELS.proxyRotateNow, async (_e, countryCode: string | null) => {
+    const summary = await proxyManager.rotate(getBrowserIds(), countryCode);
     for (const assignment of summary.assignments) {
       await browserManager.assignProxy(assignment.browserId, assignment.proxy);
     }
