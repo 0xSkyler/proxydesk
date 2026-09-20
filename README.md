@@ -189,3 +189,12 @@ Being direct about what this project can't fully guarantee:
 - **Auto-update is not wired up.** The project is structured so `electron-updater` can be added later (electron-builder + NSIS already support it) but no update server or `autoUpdater` calls are implemented in this version.
 - **BrowserView is used, not the newer WebContentsView.** Electron 31.x still fully supports `BrowserView`; `WebContentsView` is the documented eventual replacement. Swapping later only changes how a view attaches to the window, not the per-session-proxy design.
 - **10 Chromium sessions are inherently RAM/CPU-heavy.** This is a Chromium/OS-level cost, not something any Electron app can eliminate; Settings exposes levers (browser count, concurrent page loads, suspend-inactive) to trade functionality for resource usage on constrained machines.
+
+
+## SEO Tracker, Enhanced Keep Alive and Timed Rotation
+
+The SEO Tracker runs a user-triggered Google search in each selected browser, scans up to the configured number of result pages for a target hostname, clicks the matching organic result in the Google results page itself, waits for the target page to load, and then starts Keep Alive for that browser. Google challenge pages are reported as blocked rather than treated as a result.
+
+Enhanced Keep Alive performs randomized scrolling and can optionally hop to visible same-site content links. Page hopping is configurable from 0 to 1000 and filters account, login, logout, cart, checkout, payment, download, admin and destructive paths.
+
+Proxy rotation can be enabled with a custom interval in seconds (minimum 5 seconds). Timed rotation uses the existing proxy pool rather than re-running the complete proxy validation pipeline on every tick. The toolbar also provides a **Rotate Now** action.
