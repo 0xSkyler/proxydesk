@@ -168,6 +168,12 @@ export class BrowserManager extends EventEmitter {
     await Promise.allSettled([legacy.clearStorageData(), legacy.clearCache()]);
   }
 
+  async purgeLegacyPersistentSessions(ids: number[]): Promise<void> {
+    for (const id of ids) {
+      await this.clearLegacyPersistentPartition(id);
+    }
+  }
+
   async createBrowser(id: number, options: BrowserManagerOptions): Promise<void> {
     if (this.browsers.has(id)) return;
 
@@ -645,12 +651,14 @@ export class BrowserManager extends EventEmitter {
     clipboard.writeText(text);
   }
 
-  configureKeepAlive(intervalMs: number, maxHops: number, followLinks: boolean): void {
+  configureKeepAlive(intervalMs: number, maxHops: number, _followLinks: boolean): void {
     this.keepAliveIntervalMs = Math.max(5_000, Math.min(3_600_000, Math.floor(intervalMs || 60_000)));
     // This central value is the maximum number of content pages processed
     // by each Keep Alive run, including the initial landing page.
     this.keepAliveMaxHops = Math.max(1, Math.min(1000, Math.floor(maxHops || 1)));
-    this.keepAliveFollowLinks = followLinks;
+    // Enhanced Keep Alive always follows eligible same-site content after
+    // completing the full-page scroll cycles, as requested.
+    this.keepAliveFollowLinks = true;
 
     if (!this.keepAliveTimer) {
       this.keepAliveTimer = setInterval(() => this.tickKeepAlive(), 1000);
