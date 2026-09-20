@@ -77,6 +77,9 @@ async function bootstrap(): Promise<void> {
   await proxyManager.init();
 
   browserManager = new BrowserManager();
+  // Remove browser cookies/cache/site storage left by any older persistent
+  // build for every possible workspace id before this run starts.
+  await browserManager.purgeLegacyPersistentSessions(BROWSER_IDS);
 
   await createWindow();
 
