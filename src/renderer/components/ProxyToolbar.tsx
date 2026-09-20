@@ -68,6 +68,22 @@ export function ProxyToolbar(): JSX.Element {
     }
   }
 
+  async function rotateNow() {
+    setReloading(true);
+    try {
+      const summary = await window.app.proxy.rotateNow(selectedCountry);
+      setReloadSummary(summary);
+      pushToast(
+        `Proxy rotation complete — ${summary.assignments.filter((a) => a.proxy).length}/${summary.assignments.length} browsers reassigned.`,
+        'success'
+      );
+    } catch (err) {
+      pushToast(`Proxy rotation failed: ${(err as Error).message}`, 'error');
+    } finally {
+      setReloading(false);
+    }
+  }
+
   async function validateAll() {
     pushToast('Validating all known proxies…');
     const proxies = await window.app.proxy.validateAll();
@@ -115,6 +131,7 @@ export function ProxyToolbar(): JSX.Element {
             : '↻ Assign Proxies'}
         </button>
         <button onClick={() => setImportOpen(true)}>Import Proxies</button>
+        <button onClick={() => void rotateNow()} disabled={isReloading}>Rotate Now</button>
         <button onClick={() => void validateAll()}>Validate All</button>
         <button onClick={() => void replaceAllFailed()}>Replace Failed</button>
       </div>
@@ -127,7 +144,7 @@ export function ProxyToolbar(): JSX.Element {
           title="Auto-scrolls every browser periodically so sites don't log you out while you're away (e.g. tending to a lab experiment). Toggle the interval in Settings."
           onClick={() => void toggleKeepAlive()}
         >
-          {keepAliveOn ? '● Keep Alive: ON' : 'Keep Alive: OFF'}
+          {keepAliveOn ? '● Keep Alive All: ON' : 'Keep Alive All: OFF'}
         </button>
       </div>
 
@@ -142,7 +159,7 @@ export function ProxyToolbar(): JSX.Element {
           Assignments
         </button>
         <button className={activePanel === 'broadcast' ? 'active' : ''} onClick={() => nav('broadcast')}>
-          Broadcast Search
+          SEO Tracker
         </button>
         <button className={activePanel === 'diagnostics' ? 'active' : ''} onClick={() => nav('diagnostics')}>
           Diagnostics
