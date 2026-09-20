@@ -70,7 +70,8 @@ export function ProxyImportDialog({ onClose }: Props): JSX.Element {
       <div className="modal modal--wide">
         <h2 id="import-title">Import Proxies</h2>
         <p className="muted">
-          One proxy per line. Supported formats: <code>http://host:port</code>,{' '}
+          One proxy per line. Importing replaces the current session proxy pool; nothing is restored after restart.
+          Supported formats: <code>http://host:port</code>,{' '}
           <code>http://user:pass@host:port</code>, <code>socks5://host:port</code>, <code>host:port</code>,{' '}
           <code>host:port:username:password</code>.
         </p>
