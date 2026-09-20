@@ -238,6 +238,20 @@ export class ProxyManager extends EventEmitter {
       }
     });
 
+    // If another reload/automation cycle superseded this one, do not let
+    // late abort completions overwrite the newer cycle's in-memory pool.
+    if (controller.signal.aborted || this.currentReloadController !== controller) {
+      return {
+        found: replacement.length,
+        countryMatched: total,
+        working,
+        assignments: browserIds.map((browserId) => ({
+          browserId,
+          proxy: this.assignments.get(browserId) ?? null
+        }))
+      };
+    }
+
     // Keep the final state from every completed validation result even if no
     // browser slot was left for that proxy.
     for (const result of results) {
@@ -278,6 +292,7 @@ export class ProxyManager extends EventEmitter {
 
     this.emit('assignmentsChanged', summary);
     onProgress?.(total, total, working, assigned);
+    if (this.currentReloadController === controller) this.currentReloadController = null;
     return summary;
   }
 
