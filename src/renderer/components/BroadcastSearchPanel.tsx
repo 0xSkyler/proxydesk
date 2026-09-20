@@ -1,7 +1,8 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useAppStore } from '../stores/appStore';
 import { BROWSER_IDS } from '../../shared/types/browser';
 import type { BroadcastSearchResult, BroadcastSearchStatus } from '../../shared/types/browser';
+import type { SeoAutomationState } from '../../shared/types/automation';
 
 const STATUS_LABEL: Record<BroadcastSearchStatus, string> = {
   matched: 'Found — clicked result',
@@ -28,6 +29,36 @@ export function BroadcastSearchPanel(): JSX.Element {
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set(ids));
   const [running, setRunning] = useState(false);
   const [results, setResults] = useState<Record<number, BroadcastSearchResult>>({});
+  const [sourceFilePath, setSourceFilePath] = useState('');
+  const [intervalSec, setIntervalSec] = useState(600);
+  const [automation, setAutomation] = useState<SeoAutomationState | null>(null);
+
+  useEffect(() => {
+    let mounted = true;
+
+    void window.app.automation.getState().then((state) => {
+      if (!mounted) return;
+      setAutomation(state);
+      if (state.sourceFilePath) setSourceFilePath(state.sourceFilePath);
+      if (state.query) setQuery(state.query);
+      if (state.targetWebsite) setTargetWebsite(state.targetWebsite);
+      if (state.intervalSec) setIntervalSec(state.intervalSec);
+      if (state.browserIds.length > 0) setSelectedIds(new Set(state.browserIds));
+    });
+
+    const offState = window.app.automation.onStateChanged((state) => {
+      setAutomation(state);
+    });
+    const offResult = window.app.automation.onSeoResult(({ result }) => {
+      setResults((prev) => ({ ...prev, [result.browserId]: result }));
+    });
+
+    return () => {
+      mounted = false;
+      offState();
+      offResult();
+    };
+  }, []);
 
   function toggleId(id: number) {
     setSelectedIds((prev) => {
@@ -77,6 +108,49 @@ export function BroadcastSearchPanel(): JSX.Element {
     }
   }
 
+  async function chooseAutomationFile() {
+    const filePath = await window.app.system.pickProxyFile();
+    if (filePath) setSourceFilePath(filePath);
+  }
+
+  async function startAutomation() {
+    const browserIds = ids.filter((id) => selectedIds.has(id));
+    try {
+      const state = await window.app.automation.start({
+        sourceFilePath,
+        query,
+        targetWebsite,
+        intervalSec,
+        browserIds
+      });
+      setAutomation(state);
+      pushToast(
+        `Autonomous SEO started — proxy file will be re-read every ${state.intervalSec} second(s).`,
+        'success'
+      );
+    } catch (err) {
+      pushToast(`Could not start autonomous SEO: ${(err as Error).message}`, 'error');
+    }
+  }
+
+  async function stopAutomation() {
+    const state = await window.app.automation.stop();
+    setAutomation(state);
+    pushToast('Autonomous SEO rotation stopped.', 'info');
+  }
+
+  async function runAutomationNow() {
+    try {
+      await window.app.automation.runNow();
+      pushToast('Automation cycle requested.', 'info');
+    } catch (err) {
+      pushToast(`Could not run automation cycle: ${(err as Error).message}`, 'error');
+    }
+  }
+
+  const automationRunning = automation?.running ?? false;
+  const nextCycleText = automation?.nextCycleAt ? new Date(automation.nextCycleAt).toLocaleTimeString() : '—';
+
   return (
     <div className="panel">
       <div className="panel__header">
@@ -84,17 +158,19 @@ export function BroadcastSearchPanel(): JSX.Element {
       </div>
 
       <p className="muted">
-        Each selected browser opens Google, searches the keyword, scans up to {settings.browser.seoMaxPages} result
-        page(s), and matches the target by hostname. When found, ProxyDesk clicks the organic Google result itself,
-        waits for the target page to load, and starts enhanced Keep Alive in that browser.
+        A manual run searches Google once. Autonomous mode re-reads your selected proxy file every cycle, validates
+        its proxies concurrently, assigns each working proxy immediately as soon as it is confirmed, runs the saved
+        keyword + target search in that browser, clicks the matching Google result, and then switches that browser
+        into enhanced Keep Alive.
       </p>
 
-      <div className="provider-form" style={{ maxWidth: 560 }}>
+      <div className="provider-form" style={{ maxWidth: 680 }}>
         <label>
           Google keyword / search query
           <input
             type="text"
             value={query}
+            disabled={automationRunning}
             onChange={(e) => setQuery(e.target.value)}
             placeholder="e.g. garment inventory safety stock Bangladesh"
           />
@@ -104,6 +180,7 @@ export function BroadcastSearchPanel(): JSX.Element {
           <input
             type="text"
             value={targetWebsite}
+            disabled={automationRunning}
             onChange={(e) => setTargetWebsite(e.target.value)}
             placeholder="e.g. appareldiary.com"
           />
@@ -111,20 +188,107 @@ export function BroadcastSearchPanel(): JSX.Element {
       </div>
 
       <div className="panel__section">
+        <h3>Autonomous proxy + SEO rotation</h3>
+        <p className="muted">
+          The file path, keyword and target are kept for the current app session only. Each cycle reads the file
+          again, so you can update the file on disk and ProxyDesk will validate the latest contents on the next
+          cycle. Default cadence is 600 seconds (10 minutes).
+        </p>
+
+        <div className="provider-form" style={{ maxWidth: 760 }}>
+          <label>
+            Live proxy source file
+            <div style={{ display: 'flex', gap: 8 }}>
+              <input
+                type="text"
+                readOnly
+                value={sourceFilePath}
+                placeholder="Select a proxy.txt / .csv file from this PC"
+                style={{ flex: 1 }}
+              />
+              <button type="button" disabled={automationRunning} onClick={() => void chooseAutomationFile()}>
+                Select File
+              </button>
+            </div>
+          </label>
+          <label>
+            Rotation / cycle interval (seconds)
+            <input
+              type="number"
+              min={5}
+              max={86400}
+              disabled={automationRunning}
+              value={intervalSec}
+              onChange={(e) => setIntervalSec(Number(e.target.value))}
+            />
+          </label>
+        </div>
+
+        <div className="panel__actions">
+          <button
+            className="btn-primary"
+            disabled={automationRunning}
+            onClick={() => void startAutomation()}
+          >
+            Start Autonomous SEO
+          </button>
+          <button disabled={!automationRunning} onClick={() => void runAutomationNow()}>
+            Run Cycle Now
+          </button>
+          <button disabled={!automationRunning} onClick={() => void stopAutomation()}>
+            Stop Autonomous SEO
+          </button>
+        </div>
+
+        <div className="muted" style={{ marginTop: 10 }}>
+          Status: {automationRunning ? (automation?.cycleInProgress ? 'RUNNING CYCLE' : 'WAITING') : 'STOPPED'}
+          {' · '}Cycle: {automation?.cycleNumber ?? 0}
+          {' · '}Validation: {automation?.checkedProxies ?? 0}/{automation?.totalProxies ?? 0}
+          {' · '}Live: {automation?.liveProxies ?? 0}
+          {' · '}Assigned: {automation?.assignedBrowsers ?? 0}/{automation?.browserIds.length ?? 0}
+          {' · '}Next: {nextCycleText}
+        </div>
+        {automation?.lastError && <p className="status-bad">Last automation error: {automation.lastError}</p>}
+        <p className="muted">
+          Google challenge/consent pages are reported as blocked for that cycle. Autonomous mode does not immediately
+          switch proxies in response to a challenge; it waits for the normal scheduled rotation.
+        </p>
+      </div>
+
+      <div className="panel__section">
         <h3>Run on browsers</h3>
         <div className="filters">
           {ids.map((id) => (
             <label key={id} className="checkbox-label">
-              <input type="checkbox" checked={selectedIds.has(id)} onChange={() => toggleId(id)} />
+              <input
+                type="checkbox"
+                disabled={automationRunning}
+                checked={selectedIds.has(id)}
+                onChange={() => toggleId(id)}
+              />
               {browsers[id]?.label ?? `Browser ${id}`}
             </label>
           ))}
         </div>
         <div className="panel__actions">
-          <button onClick={() => setSelectedIds(new Set(ids))} disabled={running}>Select All</button>
-          <button onClick={() => setSelectedIds(new Set())} disabled={running}>Select None</button>
-          <button className="btn-primary" onClick={() => void run()} disabled={running}>
-            {running ? 'Searching Google…' : 'Run SEO Search'}
+          <button
+            onClick={() => setSelectedIds(new Set(ids))}
+            disabled={running || automationRunning}
+          >
+            Select All
+          </button>
+          <button
+            onClick={() => setSelectedIds(new Set())}
+            disabled={running || automationRunning}
+          >
+            Select None
+          </button>
+          <button
+            className="btn-primary"
+            onClick={() => void run()}
+            disabled={running || automationRunning}
+          >
+            {running ? 'Searching Google…' : 'Run SEO Search Once'}
           </button>
         </div>
       </div>
