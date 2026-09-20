@@ -198,3 +198,22 @@ The SEO Tracker runs a user-triggered Google search in each selected browser, sc
 Enhanced Keep Alive performs randomized scrolling and can optionally hop to visible same-site content links. Page hopping is configurable from 0 to 1000 and filters account, login, logout, cart, checkout, payment, download, admin and destructive paths.
 
 Proxy rotation can be enabled with a custom interval in seconds (minimum 5 seconds). Timed rotation uses the existing proxy pool rather than re-running the complete proxy validation pipeline on every tick. The toolbar also provides a **Rotate Now** action.
+
+
+## Autonomous Proxy File + SEO Rotation (v0.3)
+
+The SEO Tracker now includes a session-only autonomous mode:
+
+1. Select a local proxy `.txt` or `.csv` file.
+2. Enter one Google keyword/search query and one target website/domain.
+3. Select the browser workspaces to include.
+4. Choose a cycle interval in seconds (600 seconds / 10 minutes by default).
+5. Start Autonomous SEO.
+
+At the start of every cycle ProxyDesk re-reads the selected file from disk, replaces the in-memory proxy pool with its latest contents, and validates proxies concurrently. Each proxy that validates successfully is assigned to an available browser immediately; ProxyDesk does **not** wait for the full validation batch to finish before using it.
+
+As soon as a browser receives a live proxy it runs the saved Google keyword search, checks the visible result page for the target hostname, clicks the matching organic result, verifies that it landed on the target, and then enters enhanced Keep Alive. The same saved keyword and target are reused on every subsequent rotation until the user stops autonomous mode.
+
+If a Google challenge/consent page is observed during autonomous SEO, that browser's current attempt is reported as blocked. Autonomous mode does not immediately change proxies in response to that challenge; it waits for the next ordinary scheduled rotation cycle.
+
+The selected file path, keyword, target, runtime proxy pool, credentials, assignments and automation state are kept in memory only. Closing ProxyDesk clears them.
