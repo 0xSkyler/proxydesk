@@ -52,7 +52,9 @@ export const useAppStore = create<AppStoreState>((set) => ({
         canGoForward: false,
         proxy: null,
         connectionStatus: 'idle',
-        crashCount: 0
+        crashCount: 0,
+        keepAliveEnabled: false,
+        keepAliveHops: 0
       } satisfies BrowserState
     ])
   ),
