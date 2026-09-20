@@ -28,6 +28,7 @@ export class ProxyManager extends EventEmitter {
   private importedProxies: ProxyRecord[] = [];
   private assignments = new Map<number, ProxyRecord | null>();
   private currentReloadController: AbortController | null = null;
+  private rotationOffset = 0;
 
   constructor(
     private readonly storage: StorageManager,
@@ -134,6 +135,43 @@ export class ProxyManager extends EventEmitter {
       found,
       countryMatched,
       working,
+      assignments
+    };
+    this.emit('assignmentsChanged', summary);
+    return summary;
+  }
+
+  /**
+   * Reassigns from the already-known proxy pool without revalidating the
+   * complete list on every timer tick. Previously-confirmed working proxies
+   * are preferred when validation is enabled.
+   */
+  async rotate(browserIds: number[], countryCode: string | null): Promise<ReloadProxiesSummary> {
+    const settings = this.settings.get();
+    const known = dedupeProxies(Array.from(this.allProxies.values()));
+    const countryFiltered = filterByCountry(known, countryCode).filter((p) => p.status !== 'dead');
+    const confirmed = countryFiltered.filter((p) => p.status === 'working');
+    const candidates = settings.proxy.validationEnabled && confirmed.length > 0 ? confirmed : countryFiltered;
+
+    const offset = candidates.length === 0 ? 0 : this.rotationOffset % candidates.length;
+    const assignments = assignProxies(candidates, {
+      browserIds,
+      allowProxyReuse: settings.proxy.allowProxyReuse,
+      currentAssignments: this.assignments,
+      keepExisting: false,
+      startOffset: offset
+    });
+
+    this.rotationOffset =
+      candidates.length === 0 ? 0 : (offset + Math.max(1, browserIds.length)) % candidates.length;
+
+    for (const assignment of assignments) this.assignments.set(assignment.browserId, assignment.proxy);
+    await this.persist();
+
+    const summary: ReloadProxiesSummary = {
+      found: known.length,
+      countryMatched: countryFiltered.length,
+      working: confirmed.length,
       assignments
     };
     this.emit('assignmentsChanged', summary);
