@@ -1,8 +1,8 @@
 {
   "name": "proxydesk",
   "productName": "ProxyDesk",
-  "version": "0.1.0",
-  "description": "Multi-browser proxy workspace desktop application — 10 independent, proxy-isolated Chromium sessions in one window.",
+  "version": "0.2.1",
+  "description": "ProxyDesk SEO with multi-browser tracking, enhanced Keep Alive, ephemeral proxy sessions and timed rotation.",
   "author": "ProxyDesk",
   "license": "MIT",
   "repository": {
