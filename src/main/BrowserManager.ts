@@ -884,7 +884,7 @@ interface GoogleResultScan {
 function buildGoogleResultScanScript(targetHost: string): string {
   return `(function() {
     try {
-      var target = ${JSON.stringify(targetHost.toLowerCase().replace(/^www\\./, ''))};
+      var target = ${JSON.stringify(targetHost.toLowerCase())};
       var loc = window.location.href;
       if (/\\/sorry\\/|consent\\.google\\./.test(loc)) {
         return { blocked: true, ready: true, resultsScanned: 0 };
@@ -974,7 +974,7 @@ function buildGoogleResultScanScript(targetHost: string): string {
 function buildClickGoogleTargetResultScript(targetHost: string): string {
   return `(function() {
     try {
-      var target = ${JSON.stringify(targetHost.toLowerCase().replace(/^www\\./, ''))};
+      var target = ${JSON.stringify(targetHost.toLowerCase())};
 
       function unwrap(href) {
         try {
@@ -1017,7 +1017,7 @@ function buildClickGoogleTargetResultScript(targetHost: string): string {
         var displayText = nearbyText.toLowerCase().replace(/www\\./g, '');
         if (!destinationMatches(destination) && !displayText.includes(target)) continue;
 
-        anchor.scrollIntoView({ block: 'center', behavior: 'instant' });
+        anchor.scrollIntoView({ block: 'center', behavior: 'auto' });
         anchor.click();
         return true;
       }
