@@ -1,6 +1,12 @@
 import { EventEmitter } from 'node:events';
 import { promises as fs } from 'node:fs';
-import type { ProxyImportResult, ProxyRecord, ReloadProgress, ReloadProxiesSummary } from '../shared/types/proxy';
+import type {
+  ProxyAssignment,
+  ProxyImportResult,
+  ProxyRecord,
+  ReloadProgress,
+  ReloadProxiesSummary
+} from '../shared/types/proxy';
 import type { SettingsManager } from './SettingsManager';
 import type { StorageManager } from './StorageManager';
 import { dedupeProxies, parseBulkText } from '../proxy/ProxyParser';
@@ -131,6 +137,153 @@ export class ProxyManager extends EventEmitter {
     };
     this.emit('assignmentsChanged', summary);
     return summary;
+  }
+
+  /**
+   * Re-reads a proxy file and validates its contents with bounded
+   * concurrency. Each working proxy is surfaced immediately and assigned to
+   * one browser without waiting for the rest of the batch to finish.
+   *
+   * The selected file replaces the previous in-memory pool for this cycle.
+   * Existing assignments are remembered only to prefer a different proxy
+   * for the same browser when possible.
+   */
+  async validateFileStreaming(
+    filePath: string,
+    browserIds: number[],
+    countryCode: string | null,
+    onAssignment: (assignment: ProxyAssignment, checked: number, total: number) => void,
+    onProgress?: (checked: number, total: number, working: number, assigned: number) => void
+  ): Promise<ReloadProxiesSummary> {
+    this.currentReloadController?.abort();
+    const controller = new AbortController();
+    this.currentReloadController = controller;
+
+    const previousAssignments = new Map(this.assignments);
+    const text = await fs.readFile(filePath, 'utf8');
+    const { proxies } = parseBulkText(text, 'Automated file');
+    const replacement = dedupeProxies(proxies);
+
+    this.allProxies.clear();
+    this.assignments.clear();
+    for (const proxy of replacement) {
+      this.allProxies.set(proxy.id, { ...proxy, status: 'checking' });
+    }
+
+    const settings = this.settings.get();
+    const candidates = filterByCountry(Array.from(this.allProxies.values()), countryCode);
+    const total = candidates.length;
+    const remaining = new Set(browserIds);
+    const usedProxyIds = new Set<string>();
+    let working = 0;
+    let assigned = 0;
+
+    this.emit('reloadProgress', { checked: 0, total });
+    onProgress?.(0, total, 0, 0);
+
+    const chooseBrowserFor = (proxy: ProxyRecord): number | null => {
+      const ids = Array.from(remaining);
+      if (ids.length === 0) return null;
+      const different = ids.find((id) => previousAssignments.get(id)?.id !== proxy.id);
+      return different ?? ids[0] ?? null;
+    };
+
+    const results = await ProxyValidator.validateMany(candidates, {
+      timeoutMs: settings.proxy.validationTimeoutMs,
+      ipCheckUrl: settings.proxy.ipCheckUrl,
+      maxConcurrent: settings.proxy.maxConcurrentChecks,
+      signal: controller.signal,
+      onResult: (result, checked, resultTotal) => {
+        if (controller.signal.aborted) return;
+        const proxy = this.allProxies.get(result.proxyId);
+        if (!proxy) return;
+
+        proxy.status = result.status;
+        proxy.latencyMs = result.latencyMs;
+        proxy.lastChecked = result.checkedAt;
+        if (result.status === 'working') {
+          proxy.successCount += 1;
+          working += 1;
+        } else {
+          proxy.failureCount += 1;
+        }
+        proxy.score = scoreProxy(proxy);
+        this.allProxies.set(proxy.id, proxy);
+
+        if (result.status === 'working' && !usedProxyIds.has(proxy.id)) {
+          const browserId = chooseBrowserFor(proxy);
+          if (browserId != null) {
+            this.assignments.set(browserId, proxy);
+            remaining.delete(browserId);
+            usedProxyIds.add(proxy.id);
+            assigned += 1;
+
+            const assignment: ProxyAssignment = { browserId, proxy };
+            onAssignment(assignment, checked, resultTotal);
+
+            this.emit('assignmentsChanged', {
+              found: replacement.length,
+              countryMatched: total,
+              working,
+              assignments: browserIds.map((id) => ({
+                browserId: id,
+                proxy: this.assignments.get(id) ?? null
+              }))
+            });
+          }
+        }
+
+        this.emit('reloadProgress', { checked, total: resultTotal });
+        onProgress?.(checked, resultTotal, working, assigned);
+      }
+    });
+
+    // Keep the final state from every completed validation result even if no
+    // browser slot was left for that proxy.
+    for (const result of results) {
+      const proxy = this.allProxies.get(result.proxyId);
+      if (!proxy) continue;
+      proxy.status = result.status;
+      proxy.latencyMs = result.latencyMs;
+      proxy.lastChecked = result.checkedAt;
+      proxy.score = scoreProxy(proxy);
+      this.allProxies.set(proxy.id, proxy);
+    }
+
+    // Optional reuse only happens after unique working proxies have been
+    // consumed. Default settings keep reuse disabled.
+    if (!controller.signal.aborted && settings.proxy.allowProxyReuse && remaining.size > 0) {
+      const live = Array.from(this.allProxies.values()).filter((proxy) => proxy.status === 'working');
+      let reuseIndex = 0;
+      for (const browserId of Array.from(remaining)) {
+        if (live.length === 0) break;
+        const proxy = live[reuseIndex % live.length];
+        reuseIndex += 1;
+        this.assignments.set(browserId, proxy);
+        remaining.delete(browserId);
+        assigned += 1;
+        onAssignment({ browserId, proxy }, total, total);
+      }
+    }
+
+    const summary: ReloadProxiesSummary = {
+      found: replacement.length,
+      countryMatched: total,
+      working,
+      assignments: browserIds.map((browserId) => ({
+        browserId,
+        proxy: this.assignments.get(browserId) ?? null
+      }))
+    };
+
+    this.emit('assignmentsChanged', summary);
+    onProgress?.(total, total, working, assigned);
+    return summary;
+  }
+
+  cancelCurrentValidation(): void {
+    this.currentReloadController?.abort();
+    this.currentReloadController = null;
   }
 
   /**
