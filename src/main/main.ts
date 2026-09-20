@@ -7,7 +7,6 @@ import { StorageManager } from './StorageManager';
 import { registerIpc } from './ipc/registerIpc';
 import { logger } from './Logger';
 import { BROWSER_IDS } from '../shared/types/browser';
-import type { ProxyRotationInterval } from '../shared/types/settings';
 
 const isDev = process.env.NODE_ENV === 'development' || !app.isPackaged;
 
@@ -98,6 +97,7 @@ async function bootstrap(): Promise<void> {
       userAgent: settings.browser.userAgent,
       onGoogleBlocked: (browserId, continueUrl) => void handleGoogleBlocked(browserId, continueUrl)
     });
+    if (settings.browser.keepAliveEnabled) browserManager.setBrowserKeepAlive(id, true, true);
   }
 
   if (settings.proxy.autoLoadOnStartup) {
@@ -116,16 +116,25 @@ async function bootstrap(): Promise<void> {
     }
   }
 
-  browserManager.setKeepAlive(settings.browser.keepAliveEnabled, settings.browser.keepAliveIntervalSec * 1000);
+  browserManager.configureKeepAlive(
+    settings.browser.keepAliveIntervalSec * 1000,
+    settings.browser.keepAliveMaxHops,
+    settings.browser.keepAliveFollowLinks
+  );
+  if (settings.browser.keepAliveEnabled) browserManager.setKeepAliveAll(true, true);
+  let globalKeepAliveEnabled = settings.browser.keepAliveEnabled;
   scheduleProxyRotation();
 
-  // Both the keep-alive nudge timer and the proxy-rotation timer only read
-  // settings at the moment they're (re)armed, so a live change in Settings
-  // needs to re-arm them — otherwise flipping "Keep sessions alive" on, or
-  // switching the rotation interval, would silently do nothing until a
-  // restart.
   settingsManager.onChange((updated) => {
-    browserManager.setKeepAlive(updated.browser.keepAliveEnabled, updated.browser.keepAliveIntervalSec * 1000);
+    browserManager.configureKeepAlive(
+      updated.browser.keepAliveIntervalSec * 1000,
+      updated.browser.keepAliveMaxHops,
+      updated.browser.keepAliveFollowLinks
+    );
+    if (updated.browser.keepAliveEnabled !== globalKeepAliveEnabled) {
+      globalKeepAliveEnabled = updated.browser.keepAliveEnabled;
+      browserManager.setKeepAliveAll(globalKeepAliveEnabled, globalKeepAliveEnabled);
+    }
     scheduleProxyRotation();
     void syncBrowserCount(updated);
   });
@@ -133,28 +142,8 @@ async function bootstrap(): Promise<void> {
   logger.info('application', 'ProxyDesk ready.');
 }
 
-/** Milliseconds for each rotation choice, or null for 'off'/'manual' (no
- * automatic timer — the user triggers reassignment by hand via the toolbar). */
-function rotationIntervalMs(interval: ProxyRotationInterval): number | null {
-  switch (interval) {
-    case '10m':
-      return 10 * 60 * 1000;
-    case '30m':
-      return 30 * 60 * 1000;
-    case '60m':
-      return 60 * 60 * 1000;
-    case 'off':
-    case 'manual':
-    default:
-      return null;
-  }
-}
-
 /**
- * (Re-)arms the automatic proxy-rotation timer from the current setting.
- * Always clears any previous timer first, so calling this again after a
- * settings change (or at startup) never stacks multiple timers running the
- * same rotation concurrently.
+ * Re-arms second-based proxy rotation from the existing proxy pool.
  */
 function scheduleProxyRotation(): void {
   if (rotationTimer) {
@@ -162,32 +151,25 @@ function scheduleProxyRotation(): void {
     rotationTimer = null;
   }
 
-  const ms = rotationIntervalMs(settingsManager.get().proxy.rotationInterval);
-  if (ms == null) return;
+  const proxySettings = settingsManager.get().proxy;
+  if (!proxySettings.autoRotationEnabled) return;
 
-  rotationTimer = setInterval(() => void runProxyRotation(), ms);
-  logger.info('application', `Automatic proxy rotation armed: every ${ms / 60000} minute(s).`);
+  const seconds = Math.max(5, Math.min(86400, Math.floor(proxySettings.rotationIntervalSec || 60)));
+  rotationTimer = setInterval(() => void runProxyRotation(), seconds * 1000);
+  logger.info('application', `Automatic proxy rotation armed: every ${seconds} second(s).`);
 }
 
-/**
- * One rotation cycle: validate the known proxy pool, assign fresh ones to
- * every browser, and apply each assignment to that browser's real session
- * (which also reloads it — see BrowserManager.assignProxy) so switching off
- * a poorly-performing public proxy actually takes effect, not just in the
- * UI's bookkeeping.
- */
 async function runProxyRotation(): Promise<void> {
   const settings = settingsManager.get();
   const browserIds = BROWSER_IDS.slice(0, settings.browser.browserCount);
   try {
-    const summary = await proxyManager.reload(browserIds, settings.proxy.preferredCountryCode);
+    const summary = await proxyManager.rotate(browserIds, settings.proxy.preferredCountryCode);
     for (const assignment of summary.assignments) {
       await browserManager.assignProxy(assignment.browserId, assignment.proxy);
     }
     logger.info(
       'proxy',
-      `Automatic proxy rotation complete: ${summary.working}/${summary.found} working, ` +
-        `${summary.assignments.filter((a) => a.proxy).length}/${browserIds.length} browsers reassigned.`
+      `Automatic proxy rotation complete: ${summary.assignments.filter((a) => a.proxy).length}/${browserIds.length} browsers reassigned.`
     );
   } catch (err) {
     logger.warn('proxy', `Automatic proxy rotation failed: ${(err as Error).message}. Will retry on the next cycle.`);
