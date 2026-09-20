@@ -13,6 +13,7 @@ import type { ProxyManager } from './ProxyManager';
 import type { SettingsManager } from './SettingsManager';
 import { logger } from './Logger';
 
+// eslint-disable-next-line @typescript-eslint/no-unsafe-declaration-merging -- standard Node EventEmitter typed-events pattern
 export declare interface SeoAutomationManager {
   on(event: 'stateChanged', listener: (state: SeoAutomationState) => void): this;
   emit(event: 'stateChanged', state: SeoAutomationState): boolean;
@@ -29,6 +30,7 @@ export declare interface SeoAutomationManager {
  * clears the selected path, query and runtime rotation state along with the
  * proxy pool.
  */
+// eslint-disable-next-line @typescript-eslint/no-unsafe-declaration-merging -- standard Node EventEmitter typed-events pattern
 export class SeoAutomationManager extends EventEmitter {
   private timer: NodeJS.Timeout | null = null;
   private generation = 0;
