@@ -3,6 +3,7 @@ import { app, BrowserView, BrowserWindow, clipboard, session, type Session } fro
 import type { BroadcastSearchResult, BrowserBounds, BrowserState } from '../shared/types/browser';
 import type { ProxyRecord } from '../shared/types/proxy';
 import { EPHEMERAL_PARTITION_PREFIX, PARTITION_PREFIX } from '../shared/constants';
+import { buildGoogleSearchUrl, hostMatchesTarget, normalizeTargetHost } from '../shared/seo';
 import { logger } from './Logger';
 
 /**
@@ -80,6 +81,10 @@ interface ManagedBrowser {
   /** Consecutive Google-CAPTCHA hits since the last successful (non-block)
    * navigation or explicit navigate() call — see MAX_GOOGLE_BLOCK_RETRIES. */
   googleBlockRetries: number;
+  keepAliveEnabled: boolean;
+  keepAliveHops: number;
+  keepAliveNextAt: number;
+  keepAliveBusy: boolean;
 }
 
 /**
@@ -116,6 +121,9 @@ export class BrowserManager extends EventEmitter {
   private activeId: number | null = null;
   private globalLoginHandlerInstalled = false;
   private keepAliveTimer: NodeJS.Timeout | null = null;
+  private keepAliveIntervalMs = 60_000;
+  private keepAliveMaxHops = 25;
+  private keepAliveFollowLinks = true;
 
   attachWindow(window: BrowserWindow): void {
     this.window = window;
@@ -178,10 +186,23 @@ export class BrowserManager extends EventEmitter {
       canGoForward: false,
       proxy: null,
       connectionStatus: 'idle',
-      crashCount: 0
+      crashCount: 0,
+      keepAliveEnabled: false,
+      keepAliveHops: 0
     };
 
-    const managed: ManagedBrowser = { id, view, session: ses, state, restartAttempts: 0, googleBlockRetries: 0 };
+    const managed: ManagedBrowser = {
+      id,
+      view,
+      session: ses,
+      state,
+      restartAttempts: 0,
+      googleBlockRetries: 0,
+      keepAliveEnabled: false,
+      keepAliveHops: 0,
+      keepAliveNextAt: Date.now() + this.keepAliveIntervalMs,
+      keepAliveBusy: false
+    };
     this.browsers.set(id, managed);
     this.wireEvents(managed, options);
 
@@ -454,61 +475,126 @@ export class BrowserManager extends EventEmitter {
    * results — both are reported back as a distinct status rather than
    * silently failing or guessing.
    */
-  async broadcastSearch(id: number, query: string, matchText: string): Promise<BroadcastSearchResult> {
+  async broadcastSearch(
+    id: number,
+    query: string,
+    targetWebsite: string,
+    maxPages = 5
+  ): Promise<BroadcastSearchResult> {
     const managed = this.get(id);
     const wc = managed.view.webContents;
-    const searchUrl = `https://www.google.com/search?q=${encodeURIComponent(query)}&num=20&hl=en`;
     const ranAt = new Date().toISOString();
+    const targetHost = normalizeTargetHost(targetWebsite);
 
-    try {
-      await wc.loadURL(searchUrl);
-    } catch (err) {
-      return { browserId: id, status: 'error', error: `Failed to load search page: ${(err as Error).message}`, ranAt };
+    if (!targetHost) {
+      return { browserId: id, status: 'error', error: 'Enter a valid target website or domain.', ranAt };
     }
 
-    // loadURL's promise resolves on navigation commit, not on the results
-    // actually being painted — give the page a moment to render before
-    // reading its DOM.
-    await delay(1500);
+    const pagesToScan = Math.max(1, Math.min(10, Math.floor(maxPages || 1)));
+    let totalScanned = 0;
+    let lastSearchUrl = '';
 
-    let extracted: ExtractedSearchPage;
-    try {
-      extracted = (await wc.executeJavaScript(EXTRACT_GOOGLE_RESULTS_SCRIPT)) as ExtractedSearchPage;
-    } catch (err) {
-      return { browserId: id, status: 'error', error: `Failed to read search results: ${(err as Error).message}`, ranAt };
-    }
+    for (let pageIndex = 0; pageIndex < pagesToScan; pageIndex += 1) {
+      const searchUrl = buildGoogleSearchUrl(query, pageIndex);
+      lastSearchUrl = searchUrl;
 
-    if (extracted.blocked) {
-      return { browserId: id, status: 'blocked', landedUrl: wc.getURL(), ranAt };
-    }
+      try {
+        await wc.loadURL(searchUrl);
+      } catch (err) {
+        return {
+          browserId: id,
+          status: 'error',
+          error: `Failed to load Google results page ${pageIndex + 1}: ${(err as Error).message}`,
+          ranAt
+        };
+      }
 
-    const results = extracted.results ?? [];
-    const needle = matchText.trim().toLowerCase();
-    const match = needle
-      ? results.find((r) => r.title.toLowerCase().includes(needle) || r.text.toLowerCase().includes(needle))
-      : results[0];
+      await delay(1400);
 
-    if (!match) {
-      return { browserId: id, status: 'no-match', landedUrl: wc.getURL(), resultsScanned: results.length, ranAt };
-    }
+      let extracted: ExtractedSearchPage;
+      try {
+        extracted = (await wc.executeJavaScript(EXTRACT_GOOGLE_RESULTS_SCRIPT)) as ExtractedSearchPage;
+      } catch (err) {
+        return {
+          browserId: id,
+          status: 'error',
+          error: `Failed to read Google results: ${(err as Error).message}`,
+          ranAt
+        };
+      }
 
-    try {
-      await wc.loadURL(match.url);
-    } catch (err) {
+      if (extracted.blocked) {
+        return {
+          browserId: id,
+          status: 'blocked',
+          landedUrl: wc.getURL(),
+          resultsScanned: totalScanned,
+          ranAt
+        };
+      }
+
+      const results = extracted.results ?? [];
+      totalScanned += results.length;
+      const matchIndex = results.findIndex((result) => hostMatchesTarget(result.url, targetHost));
+      if (matchIndex < 0) continue;
+
+      const match = results[matchIndex];
+      const clicked = (await wc
+        .executeJavaScript(buildClickGoogleResultScript(match.url), true)
+        .catch(() => false)) as boolean;
+
+      if (!clicked) {
+        return {
+          browserId: id,
+          status: 'error',
+          error: `Found "${match.title}" but could not click its Google result link.`,
+          landedUrl: wc.getURL(),
+          resultsScanned: totalScanned,
+          ranAt
+        };
+      }
+
+      const deadline = Date.now() + 12_000;
+      let landedUrl = wc.getURL();
+      while (Date.now() < deadline) {
+        await delay(200);
+        landedUrl = wc.getURL();
+        if (hostMatchesTarget(landedUrl, targetHost)) break;
+      }
+
+      if (!hostMatchesTarget(landedUrl, targetHost)) {
+        return {
+          browserId: id,
+          status: 'error',
+          error: `Google result was clicked, but the browser did not land on ${targetHost} within 12 seconds.`,
+          landedUrl,
+          matchedTitle: match.title,
+          resultsScanned: totalScanned,
+          position: pageIndex * 10 + matchIndex + 1,
+          resultPage: pageIndex + 1,
+          ranAt
+        };
+      }
+
+      this.setBrowserKeepAlive(id, true, true);
       return {
         browserId: id,
-        status: 'error',
-        error: `Matched "${match.title}" but failed to open it: ${(err as Error).message}`,
+        status: 'matched',
+        landedUrl,
+        matchedTitle: match.title,
+        resultsScanned: totalScanned,
+        position: pageIndex * 10 + matchIndex + 1,
+        resultPage: pageIndex + 1,
+        keepAliveStarted: true,
         ranAt
       };
     }
 
     return {
       browserId: id,
-      status: 'matched',
-      landedUrl: match.url,
-      matchedTitle: match.title,
-      resultsScanned: results.length,
+      status: 'no-match',
+      landedUrl: lastSearchUrl || wc.getURL(),
+      resultsScanned: totalScanned,
       ranAt
     };
   }
@@ -532,98 +618,140 @@ export class BrowserManager extends EventEmitter {
     clipboard.writeText(text);
   }
 
-  /**
-   * Periodically nudges every managed browser with a full page scroll (down
-   * to the bottom, back to the top, twice over) so sites see real, sustained
-   * scroll/DOM activity and don't treat the tab as idle — this is what keeps
-   * a logged-in session (search results, a shopping cart, a form in
-   * progress) from timing out while you're away from the app and not
-   * actually interacting with anything. A 1px nudge was too small for some
-   * sites' idle detectors to register as real activity, so this walks the
-   * whole scrollable height instead. Safe to call repeatedly with new
-   * settings — it always clears any previous timer first, so re-configuring
-   * (interval change, or turning it off) never stacks multiple timers.
-   */
-  setKeepAlive(enabled: boolean, intervalMs: number): void {
-    if (this.keepAliveTimer) {
-      clearInterval(this.keepAliveTimer);
-      this.keepAliveTimer = null;
-    }
-    if (!enabled) return;
+  configureKeepAlive(intervalMs: number, maxHops: number, followLinks: boolean): void {
+    this.keepAliveIntervalMs = Math.max(5_000, Math.min(3_600_000, Math.floor(intervalMs || 60_000)));
+    this.keepAliveMaxHops = Math.max(0, Math.min(1000, Math.floor(maxHops || 0)));
+    this.keepAliveFollowLinks = followLinks;
 
-    this.keepAliveTimer = setInterval(() => {
-      for (const managed of this.browsers.values()) {
-        const wc = managed.view.webContents;
-        if (wc.isDestroyed()) continue;
-        wc.executeJavaScript(KEEP_ALIVE_SCROLL_SCRIPT, true).catch(() => {
-          // Page not ready, no scrollable content, or a cross-origin/CSP
-          // quirk — never worth surfacing as an error for a background nudge.
+    if (!this.keepAliveTimer) {
+      this.keepAliveTimer = setInterval(() => this.tickKeepAlive(), 1000);
+    }
+  }
+
+  setKeepAlive(enabled: boolean, intervalMs: number): void {
+    this.configureKeepAlive(intervalMs, this.keepAliveMaxHops, this.keepAliveFollowLinks);
+    this.setKeepAliveAll(enabled, enabled);
+  }
+
+  setBrowserKeepAlive(id: number, enabled: boolean, resetHops = false): void {
+    const managed = this.get(id);
+    managed.keepAliveEnabled = enabled;
+    if (resetHops) managed.keepAliveHops = 0;
+    managed.keepAliveNextAt = Date.now() + Math.min(1000, this.keepAliveIntervalMs);
+    this.updateState(managed, {
+      keepAliveEnabled: enabled,
+      keepAliveHops: managed.keepAliveHops
+    });
+  }
+
+  setKeepAliveAll(enabled: boolean, resetHops = false): void {
+    for (const managed of this.browsers.values()) {
+      managed.keepAliveEnabled = enabled;
+      if (resetHops) managed.keepAliveHops = 0;
+      managed.keepAliveNextAt = Date.now() + Math.min(1000, this.keepAliveIntervalMs);
+      this.updateState(managed, {
+        keepAliveEnabled: enabled,
+        keepAliveHops: managed.keepAliveHops
+      });
+    }
+  }
+
+  private tickKeepAlive(): void {
+    const now = Date.now();
+    for (const managed of this.browsers.values()) {
+      if (!managed.keepAliveEnabled || managed.keepAliveBusy || now < managed.keepAliveNextAt) continue;
+
+      const wc = managed.view.webContents;
+      if (wc.isDestroyed() || managed.state.loading) {
+        managed.keepAliveNextAt = now + 2000;
+        continue;
+      }
+
+      managed.keepAliveBusy = true;
+      const jitter = 0.8 + Math.random() * 0.4;
+      managed.keepAliveNextAt = now + Math.round(this.keepAliveIntervalMs * jitter);
+      void this.runKeepAliveAction(managed).finally(() => {
+        managed.keepAliveBusy = false;
+      });
+    }
+  }
+
+  private async runKeepAliveAction(managed: ManagedBrowser): Promise<void> {
+    const wc = managed.view.webContents;
+    const canHop =
+      this.keepAliveFollowLinks && this.keepAliveMaxHops > 0 && managed.keepAliveHops < this.keepAliveMaxHops;
+
+    try {
+      const result = (await wc.executeJavaScript(buildKeepAliveActionScript(canHop), true)) as {
+        nextUrl?: string;
+      };
+
+      this.updateState(managed, {
+        lastKeepAliveAt: new Date().toISOString(),
+        keepAliveEnabled: true,
+        keepAliveHops: managed.keepAliveHops
+      });
+
+      if (canHop && result?.nextUrl) {
+        await wc.loadURL(result.nextUrl);
+        managed.keepAliveHops += 1;
+        this.updateState(managed, {
+          keepAliveHops: managed.keepAliveHops,
+          lastKeepAliveAt: new Date().toISOString()
         });
       }
-    }, intervalMs);
+    } catch {
+      // A navigation can make script execution temporarily unavailable.
+      // Keep Alive is best-effort and will retry on its next scheduled tick.
+    }
   }
 }
 
-/**
- * Scrolls the page all the way to the bottom and back to the top, twice
- * (down, up, down, up), pausing at each end so the motion — and the scroll
- * events it fires — look like a real, sustained visit rather than a single
- * flicked wheel-tick. The browser's native `behavior: 'smooth'` scroll is
- * too quick to read as a slow, deliberate scroll (it runs at a roughly
- * fixed pixel speed with no way to configure it), so this animates the
- * scroll itself frame-by-frame over a fixed duration instead, which is what
- * actually lets the speed be tuned via SCROLL_DURATION_MS/PAUSE_MS below.
- * Runs as an async IIFE so `executeJavaScript`'s returned promise resolves
- * only once the whole sequence finishes.
- */
-const KEEP_ALIVE_SCROLL_SCRIPT = `
-(async () => {
-  const SCROLL_DURATION_MS = 3500; // time to travel from top to bottom (or back) — raise to scroll slower
-  const PAUSE_MS = 900; // pause at each end before reversing direction
+function buildKeepAliveActionScript(allowHop: boolean): string {
+  return `(async () => {
+    const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+    const root = document.scrollingElement || document.documentElement;
+    const maxScroll = Math.max(0, root.scrollHeight - window.innerHeight);
 
-  const scrollEl = document.scrollingElement || document.documentElement;
-  const maxScroll = Math.max(0, scrollEl.scrollHeight - window.innerHeight);
-  if (maxScroll <= 0) {
-    // Nothing to scroll (short page) — still nudge with a tiny scroll so
-    // there is at least some activity for the idle detector to see.
-    window.scrollBy(0, 1);
-    window.scrollBy(0, -1);
-    return;
-  }
+    if (maxScroll > 0) {
+      const current = window.scrollY;
+      const direction = Math.random() < 0.72 ? 1 : -1;
+      const distance = Math.max(180, Math.round(window.innerHeight * (0.35 + Math.random() * 0.9)));
+      const target = Math.max(0, Math.min(maxScroll, current + direction * distance));
+      window.scrollTo({ top: target, behavior: 'smooth' });
+      await wait(650 + Math.round(Math.random() * 900));
+    } else {
+      window.scrollBy(0, 1);
+      window.scrollBy(0, -1);
+      await wait(120);
+    }
 
-  const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+    if (!${allowHop ? 'true' : 'false'} || Math.random() > 0.35) return {};
 
-  // Animates the scroll position to \`target\` over \`duration\` ms with a
-  // gentle ease-in-out, rather than jumping/native-smooth-scrolling there —
-  // this is the actual knob that controls how slow the motion looks.
-  const animateScrollTo = (target, duration) =>
-    new Promise((resolve) => {
-      const startY = window.scrollY;
-      const delta = target - startY;
-      if (delta === 0) {
-        resolve();
-        return;
+    const blocked = /(login|log-in|logout|sign-in|signin|signup|register|account|cart|basket|checkout|payment|subscribe|privacy|terms|contact|download|delete|remove|admin|wp-admin|wp-login)/i;
+    const currentUrl = new URL(location.href);
+    const links = Array.from(document.querySelectorAll('a[href]')).filter((anchor) => {
+      try {
+        if (anchor.hasAttribute('download')) return false;
+        if ((anchor.getAttribute('rel') || '').toLowerCase().includes('sponsored')) return false;
+        const text = (anchor.textContent || '').trim();
+        if (text.length < 5 || blocked.test(text)) return false;
+        const url = new URL(anchor.href, location.href);
+        if (!/^https?:$/.test(url.protocol)) return false;
+        if (url.hostname !== currentUrl.hostname) return false;
+        if (url.href === currentUrl.href || blocked.test(url.pathname + url.search)) return false;
+        const rect = anchor.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+      } catch {
+        return false;
       }
-      const startTime = performance.now();
-      function step(now) {
-        const elapsed = now - startTime;
-        const t = Math.min(1, elapsed / duration);
-        const eased = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
-        window.scrollTo(0, startY + delta * eased);
-        if (t < 1) requestAnimationFrame(step);
-        else resolve();
-      }
-      requestAnimationFrame(step);
     });
 
-  for (let cycle = 0; cycle < 2; cycle++) {
-    await animateScrollTo(maxScroll, SCROLL_DURATION_MS);
-    await wait(PAUSE_MS);
-    await animateScrollTo(0, SCROLL_DURATION_MS);
-    await wait(PAUSE_MS);
-  }
-})();
-`;
+    if (links.length === 0) return {};
+    const selected = links[Math.floor(Math.random() * links.length)];
+    return { nextUrl: selected.href };
+  })()`;
+}
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -652,7 +780,19 @@ const EXTRACT_GOOGLE_RESULTS_SCRIPT = `(function() {
     var loc = window.location.href;
     if (/\\/sorry\\/|consent\\.google\\./.test(loc)) return { blocked: true };
     var bodyText = (document.body && document.body.innerText) || '';
-    if (/unusual traffic|not a robot|recaptcha/i.test(bodyText.slice(0, 2000))) return { blocked: true };
+    if (/unusual traffic|not a robot|recaptcha/i.test(bodyText.slice(0, 2500))) return { blocked: true };
+
+    function unwrap(href) {
+      try {
+        var resolved = new URL(href, location.origin);
+        if (resolved.hostname.indexOf('google.') !== -1 && resolved.pathname === '/url') {
+          return resolved.searchParams.get('q') || resolved.searchParams.get('url') || href;
+        }
+        return resolved.href;
+      } catch (_) {
+        return href;
+      }
+    }
 
     var anchors = Array.prototype.slice.call(document.querySelectorAll('a'));
     var seen = {};
@@ -660,11 +800,13 @@ const EXTRACT_GOOGLE_RESULTS_SCRIPT = `(function() {
     anchors.forEach(function (a) {
       var h3 = a.querySelector('h3');
       if (!h3) return;
-      var href = a.getAttribute('href') || '';
-      var redirectMatch = href.match(/^\\/url\\?q=([^&]+)/);
-      if (redirectMatch) href = decodeURIComponent(redirectMatch[1]);
+      var href = unwrap(a.getAttribute('href') || '');
       if (!/^https?:\\/\\//.test(href)) return;
-      if (/^https?:\\/\\/(www\\.)?google\\./.test(href)) return;
+      try {
+        if (/(^|\\.)google\\.[a-z.]+$/i.test(new URL(href).hostname)) return;
+      } catch (_) {
+        return;
+      }
       if (seen[href]) return;
       seen[href] = true;
       var container = a.closest('div') || a;
@@ -676,6 +818,33 @@ const EXTRACT_GOOGLE_RESULTS_SCRIPT = `(function() {
     return { blocked: false, results: [], scriptError: String(e) };
   }
 })()`;
+
+function buildClickGoogleResultScript(targetUrl: string): string {
+  return `(function() {
+    var target = ${JSON.stringify(targetUrl)};
+    function unwrap(href) {
+      try {
+        var resolved = new URL(href, location.origin);
+        if (resolved.hostname.indexOf('google.') !== -1 && resolved.pathname === '/url') {
+          return resolved.searchParams.get('q') || resolved.searchParams.get('url') || href;
+        }
+        return resolved.href;
+      } catch (_) {
+        return href;
+      }
+    }
+
+    var anchors = Array.prototype.slice.call(document.querySelectorAll('a'));
+    for (var i = 0; i < anchors.length; i += 1) {
+      var anchor = anchors[i];
+      if (!anchor.querySelector('h3')) continue;
+      if (unwrap(anchor.getAttribute('href') || '') !== target) continue;
+      anchor.click();
+      return true;
+    }
+    return false;
+  })()`;
+}
 
 function normalizeUrl(input: string): string {
   const trimmed = input.trim();
