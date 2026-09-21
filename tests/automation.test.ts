@@ -1,19 +1,27 @@
 import { describe, expect, it } from 'vitest';
-import { normalizeAutomationIntervalSeconds } from '../src/shared/types/automation';
+import {
+  normalizeAutomationIntervalSeconds,
+  normalizeBrowserCount,
+  normalizeSeoMaxPages
+} from '../src/shared/types/automation';
 
-describe('autonomous SEO interval normalization', () => {
-  it('uses 600 seconds for non-finite values', () => {
+describe('SEO Tracker normalization', () => {
+  it('normalizes rotation interval', () => {
     expect(normalizeAutomationIntervalSeconds(Number.NaN)).toBe(600);
-    expect(normalizeAutomationIntervalSeconds(Number.POSITIVE_INFINITY)).toBe(600);
-  });
-
-  it('clamps to a safe 5 second minimum and one day maximum', () => {
-    expect(normalizeAutomationIntervalSeconds(1)).toBe(5);
-    expect(normalizeAutomationIntervalSeconds(600)).toBe(600);
+    expect(normalizeAutomationIntervalSeconds(1)).toBe(30);
+    expect(normalizeAutomationIntervalSeconds(600.9)).toBe(600);
     expect(normalizeAutomationIntervalSeconds(999999)).toBe(86400);
   });
 
-  it('floors fractional seconds', () => {
-    expect(normalizeAutomationIntervalSeconds(600.9)).toBe(600);
+  it('allows 1-100 browsers', () => {
+    expect(normalizeBrowserCount(0)).toBe(1);
+    expect(normalizeBrowserCount(10)).toBe(10);
+    expect(normalizeBrowserCount(101)).toBe(100);
+  });
+
+  it('allows scanning 1-100 Google result pages', () => {
+    expect(normalizeSeoMaxPages(0)).toBe(1);
+    expect(normalizeSeoMaxPages(20)).toBe(20);
+    expect(normalizeSeoMaxPages(500)).toBe(100);
   });
 });
