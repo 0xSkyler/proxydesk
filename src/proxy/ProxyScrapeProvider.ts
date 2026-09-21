@@ -25,9 +25,7 @@ export function buildProxyScrapeFreeListUrl(
 
   const url = new URL(PROXYSCRAPE_FREE_API);
   url.searchParams.set('request', 'display_proxies');
-  url.searchParams.set('protocol', 'all');
   url.searchParams.set('timeout', String(timeoutFilterMs));
-  url.searchParams.set('country', 'all');
   url.searchParams.set('limit', String(limit));
   url.searchParams.set('proxy_format', 'protocolipport');
   url.searchParams.set('format', 'text');
