@@ -34,6 +34,9 @@ export class ProxyManager extends EventEmitter {
   private assignments = new Map<number, ProxyRecord | null>();
   private currentReloadController: AbortController | null = null;
   private rotationOffset = 0;
+  /** Proxies already consumed by autonomous file rotation in this app session.
+   * They are not eligible again until the current source pool is exhausted. */
+  private automationUsedProxyIds = new Set<string>();
 
   constructor(
     private readonly storage: StorageManager,
@@ -52,6 +55,7 @@ export class ProxyManager extends EventEmitter {
     ]);
     this.allProxies.clear();
     this.assignments.clear();
+    this.automationUsedProxyIds.clear();
     logger.info('proxy', 'ProxyManager initialized with an empty session-only proxy pool.');
   }
 
@@ -65,6 +69,12 @@ export class ProxyManager extends EventEmitter {
 
   getAllAssignments(): Map<number, ProxyRecord | null> {
     return this.assignments;
+  }
+
+  /** Starts a fresh autonomous rotation sequence without affecting manual
+   * rotation state. Called when the user starts a new autonomous SEO run. */
+  resetAutomationRotationHistory(): void {
+    this.automationUsedProxyIds.clear();
   }
 
   /**
@@ -164,6 +174,17 @@ export class ProxyManager extends EventEmitter {
     const { proxies } = parseBulkText(text, 'Automated file');
     const replacement = dedupeProxies(proxies);
 
+    // Keep the autonomous ledger only for proxies that still exist in the
+    // selected source file. If the whole current source pool has already
+    // been consumed, begin a new rotation round immediately.
+    const replacementIds = new Set(replacement.map((proxy) => proxy.id));
+    for (const proxyId of Array.from(this.automationUsedProxyIds)) {
+      if (!replacementIds.has(proxyId)) this.automationUsedProxyIds.delete(proxyId);
+    }
+    if (replacement.length > 0 && replacement.every((proxy) => this.automationUsedProxyIds.has(proxy.id))) {
+      this.automationUsedProxyIds.clear();
+    }
+
     this.allProxies.clear();
     this.assignments.clear();
     for (const proxy of replacement) {
@@ -174,7 +195,8 @@ export class ProxyManager extends EventEmitter {
     const candidates = filterByCountry(Array.from(this.allProxies.values()), countryCode);
     const total = candidates.length;
     const remaining = new Set(browserIds);
-    const usedProxyIds = new Set<string>();
+    // Never share one proxy between active browsers in the same cycle.
+    const cycleUsedProxyIds = new Set<string>();
     let working = 0;
     let assigned = 0;
 
@@ -182,8 +204,10 @@ export class ProxyManager extends EventEmitter {
     onProgress?.(0, total, 0, 0);
 
     const chooseBrowserFor = (proxy: ProxyRecord): number | null => {
+      if (this.automationUsedProxyIds.has(proxy.id) || cycleUsedProxyIds.has(proxy.id)) return null;
       const ids = Array.from(remaining);
       if (ids.length === 0) return null;
+      // Prefer moving each browser away from the proxy it had last cycle.
       const different = ids.find((id) => previousAssignments.get(id)?.id !== proxy.id);
       return different ?? ids[0] ?? null;
     };
@@ -210,12 +234,13 @@ export class ProxyManager extends EventEmitter {
         proxy.score = scoreProxy(proxy);
         this.allProxies.set(proxy.id, proxy);
 
-        if (result.status === 'working' && !usedProxyIds.has(proxy.id)) {
+        if (result.status === 'working' && !cycleUsedProxyIds.has(proxy.id)) {
           const browserId = chooseBrowserFor(proxy);
           if (browserId != null) {
             this.assignments.set(browserId, proxy);
             remaining.delete(browserId);
-            usedProxyIds.add(proxy.id);
+            cycleUsedProxyIds.add(proxy.id);
+            this.automationUsedProxyIds.add(proxy.id);
             assigned += 1;
 
             const assignment: ProxyAssignment = { browserId, proxy };
@@ -264,17 +289,28 @@ export class ProxyManager extends EventEmitter {
       this.allProxies.set(proxy.id, proxy);
     }
 
-    // Optional reuse only happens after unique working proxies have been
-    // consumed. Default settings keep reuse disabled.
-    if (!controller.signal.aborted && settings.proxy.allowProxyReuse && remaining.size > 0) {
-      const live = Array.from(this.allProxies.values()).filter((proxy) => proxy.status === 'working');
-      let reuseIndex = 0;
+    // If proxies that were unused in earlier cycles all turned out dead, the
+    // final live set may consist entirely of previously-used proxies. Only
+    // after the complete validation pass proves that condition do we begin a
+    // new round. Even then, a proxy remains exclusive to one browser in this
+    // cycle; extra browsers stay unassigned rather than sharing an endpoint.
+    const live = Array.from(this.allProxies.values()).filter((proxy) => proxy.status === 'working');
+    if (
+      !controller.signal.aborted &&
+      remaining.size > 0 &&
+      live.length > 0 &&
+      live.every((proxy) => this.automationUsedProxyIds.has(proxy.id))
+    ) {
+      this.automationUsedProxyIds.clear();
       for (const browserId of Array.from(remaining)) {
-        if (live.length === 0) break;
-        const proxy = live[reuseIndex % live.length];
-        reuseIndex += 1;
+        const eligible = live.filter((proxy) => !cycleUsedProxyIds.has(proxy.id));
+        if (eligible.length === 0) break;
+        const previousId = previousAssignments.get(browserId)?.id;
+        const proxy = eligible.find((candidate) => candidate.id !== previousId) ?? eligible[0];
         this.assignments.set(browserId, proxy);
         remaining.delete(browserId);
+        cycleUsedProxyIds.add(proxy.id);
+        this.automationUsedProxyIds.add(proxy.id);
         assigned += 1;
         onAssignment({ browserId, proxy }, total, total);
       }
@@ -505,6 +541,7 @@ export class ProxyManager extends EventEmitter {
     // only proxies from the most recently uploaded/pasted list are eligible.
     this.allProxies.clear();
     this.assignments.clear();
+    this.automationUsedProxyIds.clear();
     for (const proxy of replacement) this.allProxies.set(proxy.id, proxy);
 
     return {
