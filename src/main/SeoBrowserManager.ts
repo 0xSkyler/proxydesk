@@ -57,8 +57,8 @@ export class SeoBrowserManager extends EventEmitter {
     const managed = this.browsers.get(id);
     if (!managed) return;
     managed.view.setBounds({
-      x: Math.max(0, Math.floor(bounds.x)),
-      y: Math.max(0, Math.floor(bounds.y)),
+      x: Math.floor(bounds.x),
+      y: Math.floor(bounds.y),
       width: Math.max(1, Math.floor(bounds.width)),
       height: Math.max(1, Math.floor(bounds.height))
     });
@@ -229,6 +229,7 @@ export class SeoBrowserManager extends EventEmitter {
     this.window?.addBrowserView(view);
 
     const wc = view.webContents;
+    wc.session.setPermissionRequestHandler((_webContents, _permission, callback) => callback(false));
     wc.setWindowOpenHandler(() => ({ action: 'deny' }));
     wc.on('did-start-loading', () => {
       managed.state.loading = true;
@@ -364,13 +365,13 @@ export class SeoBrowserManager extends EventEmitter {
   }
 }
 
-function buildGoogleSearchUrl(query: string, pageIndex: number): string {
+export function buildGoogleSearchUrl(query: string, pageIndex: number): string {
   const params = new URLSearchParams({ q: query.trim(), num: '10', hl: 'en' });
   if (pageIndex > 0) params.set('start', String(pageIndex * 10));
   return `https://www.google.com/search?${params.toString()}`;
 }
 
-function normalizeTarget(value: string): string {
+export function normalizeTarget(value: string): string {
   const trimmed = value.trim().toLowerCase();
   if (!trimmed) return '';
   try {
@@ -390,7 +391,7 @@ function isGoogleSearchUrl(url: string): boolean {
   }
 }
 
-function buildGoogleScanScript(target: string): string {
+export function buildGoogleScanScript(target: string): string {
   return `(function() {
     try {
       var target = ${JSON.stringify(target)};
