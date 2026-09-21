@@ -10,7 +10,8 @@ describe('ProxyScrape free API source', () => {
 
     expect(url.origin + url.pathname).toBe(PROXYSCRAPE_FREE_API);
     expect(url.searchParams.get('request')).toBe('display_proxies');
-    expect(url.searchParams.get('protocol')).toBe('all');
+    expect(url.searchParams.has('protocol')).toBe(false);
+    expect(url.searchParams.has('country')).toBe(false);
     expect(url.searchParams.get('proxy_format')).toBe('protocolipport');
     expect(url.searchParams.get('format')).toBe('text');
     expect(url.searchParams.get('timeout')).toBe('6000');
