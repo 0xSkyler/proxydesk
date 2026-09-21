@@ -9,7 +9,11 @@ vi.mock('electron', () => ({
   session: { fromPartition: vi.fn() }
 }));
 
-import { BrowserManager, buildGoogleResultScanScript } from '../src/main/BrowserManager';
+import {
+  BrowserManager,
+  buildEphemeralPartitionName,
+  buildGoogleResultScanScript
+} from '../src/main/BrowserManager';
 
 function installManagedBrowser(
   manager: BrowserManager,
@@ -49,6 +53,18 @@ function installManagedBrowser(
   internals.browsers.set(id, managed);
   return internals.keepAliveTimer;
 }
+
+describe('browser session isolation', () => {
+  it('uses a different in-memory partition for every browser and process run', () => {
+    const a = buildEphemeralPartitionName(1, 1001);
+    const b = buildEphemeralPartitionName(2, 1001);
+    const restarted = buildEphemeralPartitionName(1, 2002);
+
+    expect(a).not.toContain('persist:');
+    expect(a).not.toBe(b);
+    expect(a).not.toBe(restarted);
+  });
+});
 
 describe('Google SEO page scanning', () => {
   it('matches screenshot-style Google markup where domain and article title share a result card', () => {
