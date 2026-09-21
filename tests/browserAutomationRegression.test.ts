@@ -186,6 +186,16 @@ describe('browser automation regressions', () => {
   it('finds a screenshot-like result when the domain label is a sibling of the blue title link', () => {
     const targetUrl = 'https://appareldiary.com/article/precision-and-profit-rmg-cutting';
     const rect = { left: 65, top: 285, width: 520, height: 34, right: 585, bottom: 319 };
+    const siteAnchor = {
+      href: 'https://appareldiary.com/',
+      innerText: 'appareldiary.com',
+      getAttribute: (name: string) => (name === 'href' ? 'https://appareldiary.com/' : null),
+      querySelector: () => null,
+      closest: (selector: string) => (selector.includes('MjjYud') ? resultCard : null),
+      parentElement: null,
+      getBoundingClientRect: () => ({ left: 112, top: 228, width: 180, height: 24, right: 292, bottom: 252 }),
+      scrollIntoView: vi.fn()
+    };
     const titleAnchor = {
       href: targetUrl,
       innerText: 'RMG Cutting Process: A Stage-by-Stage Control Guide',
@@ -209,12 +219,12 @@ describe('browser automation regressions', () => {
       innerText: 'appareldiary.com\nhttps://appareldiary.com › article › precision-and-profit-a...\nRMG Cutting Process: A Stage-by-Stage Control Guide',
       parentElement: null,
       querySelector: (selector: string) => (selector === 'a[href]' ? titleAnchor : null),
-      querySelectorAll: (selector: string) => (selector === 'a[href]' ? [titleAnchor] : []),
+      querySelectorAll: (selector: string) => (selector === 'a[href]' ? [siteAnchor, titleAnchor] : []),
       closest: () => null
     };
     const searchRoot = {
       querySelectorAll: (selector: string) => {
-        if (selector === 'a[href]') return [titleAnchor];
+        if (selector === 'a[href]') return [siteAnchor, titleAnchor];
         if (selector === 'span, cite, div') return [domainNode];
         return [];
       }
