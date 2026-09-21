@@ -4,9 +4,21 @@
     "module": "ESNext",
     "moduleResolution": "Bundler",
     "jsx": "react-jsx",
-    "lib": ["ES2022", "DOM", "DOM.Iterable"],
-    "types": ["vite/client"],
+    "lib": [
+      "ES2022",
+      "DOM",
+      "DOM.Iterable"
+    ],
+    "types": [
+      "vite/client"
+    ],
     "noEmit": true
   },
-  "include": ["src/renderer/**/*", "src/shared/**/*"]
+  "include": [
+    "src/renderer/App.tsx",
+    "src/renderer/main.tsx",
+    "src/renderer/global.d.ts",
+    "src/shared/ipc.ts",
+    "src/shared/tracker.ts"
+  ]
 }
