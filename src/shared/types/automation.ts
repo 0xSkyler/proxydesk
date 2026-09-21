@@ -1,24 +1,28 @@
 import type { BroadcastSearchResult } from './browser';
 
 export interface SeoAutomationConfig {
-  sourceFilePath: string;
   query: string;
   targetWebsite: string;
-  /** Cycle cadence in seconds. Default UI value is 600 (10 minutes). */
+  /** How often a new ProxyScrape fetch + validation + proxy rotation begins. */
   intervalSec: number;
-  /** Browser workspaces included in the autonomous workflow. */
-  browserIds: number[];
+  /** Number of isolated browser workspaces, 1-100. */
+  browserCount: number;
+  /** Maximum Google result pages to inspect for each browser, 1-100. */
+  maxPages: number;
 }
 
 export interface SeoAutomationState {
   running: boolean;
   cycleInProgress: boolean;
-  sourceFilePath: string | null;
+  proxySource: 'ProxyScrape Free API';
   query: string;
   targetWebsite: string;
   intervalSec: number;
+  browserCount: number;
+  maxPages: number;
   browserIds: number[];
   cycleNumber: number;
+  fetchedProxies: number;
   checkedProxies: number;
   totalProxies: number;
   liveProxies: number;
@@ -36,5 +40,15 @@ export interface SeoAutomationResult {
 
 export function normalizeAutomationIntervalSeconds(value: number): number {
   if (!Number.isFinite(value)) return 600;
-  return Math.max(5, Math.min(86_400, Math.floor(value)));
+  return Math.max(30, Math.min(86_400, Math.floor(value)));
+}
+
+export function normalizeBrowserCount(value: number): number {
+  if (!Number.isFinite(value)) return 10;
+  return Math.max(1, Math.min(100, Math.floor(value)));
+}
+
+export function normalizeSeoMaxPages(value: number): number {
+  if (!Number.isFinite(value)) return 20;
+  return Math.max(1, Math.min(100, Math.floor(value)));
 }
