@@ -684,7 +684,7 @@ export class BrowserManager extends EventEmitter {
       const currentUrl = managed.view.webContents.getURL();
       if (currentUrl) managed.keepAliveVisited.add(currentUrl);
     }
-    managed.keepAliveNextAt = enabled ? Date.now() + 100 : Number.POSITIVE_INFINITY;
+    managed.keepAliveNextAt = enabled ? Date.now() : Number.POSITIVE_INFINITY;
     this.updateState(managed, {
       keepAliveEnabled: enabled,
       keepAliveHops: managed.keepAliveHops
@@ -702,7 +702,7 @@ export class BrowserManager extends EventEmitter {
         const currentUrl = managed.view.webContents.getURL();
         if (currentUrl) managed.keepAliveVisited.add(currentUrl);
       }
-      managed.keepAliveNextAt = enabled ? Date.now() + 100 : Number.POSITIVE_INFINITY;
+      managed.keepAliveNextAt = enabled ? Date.now() : Number.POSITIVE_INFINITY;
       this.updateState(managed, {
         keepAliveEnabled: enabled,
         keepAliveHops: managed.keepAliveHops
@@ -727,8 +727,12 @@ export class BrowserManager extends EventEmitter {
       managed.keepAliveBusy = true;
       void this.runKeepAliveAction(managed).finally(() => {
         managed.keepAliveBusy = false;
-        const jitter = 0.8 + Math.random() * 0.4;
-        managed.keepAliveNextAt = Date.now() + Math.round(this.keepAliveIntervalMs * jitter);
+        // Preserve a short retry explicitly scheduled by the action's error
+        // handler; otherwise use the normal jittered content-page interval.
+        if (managed.keepAliveNextAt <= Date.now()) {
+          const jitter = 0.8 + Math.random() * 0.4;
+          managed.keepAliveNextAt = Date.now() + Math.round(this.keepAliveIntervalMs * jitter);
+        }
       });
     }
   }
