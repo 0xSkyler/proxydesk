@@ -185,6 +185,7 @@ export function SeoTrackerPanel(): JSX.Element {
         Google pages are scanned sequentially up to the configured limit. Each page is
         stopped as soon as its DOM is ready, so detection does not wait for complete page
         loading. Keep Alive starts automatically only after the matched article opens.
+        Browser sessions are isolated in memory and start fresh after every app restart.
       </div>
 
       <div className="tracker-results">
