@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildGoogleSearchUrl, hostMatchesTarget, normalizeTargetHost } from '../src/shared/seo';
+import { buildGoogleSearchUrl, hostMatchesTarget, normalizeTargetHost, resultTextMentionsHost } from '../src/shared/seo';
 
 describe('SEO helpers', () => {
   it('normalizes URLs and plain domains', () => {
@@ -17,5 +17,11 @@ describe('SEO helpers', () => {
   it('builds paged Google URLs', () => {
     expect(buildGoogleSearchUrl('inventory safety stock', 0)).toContain('q=inventory+safety+stock');
     expect(buildGoogleSearchUrl('inventory safety stock', 2)).toContain('start=20');
+  });
+
+  it('detects a target from visible Google citation text without substring false positives', () => {
+    expect(resultTextMentionsHost('ApparelDiary.com › article › safety-stock', 'appareldiary.com')).toBe(true);
+    expect(resultTextMentionsHost('www.appareldiary.com/article/test', 'appareldiary.com')).toBe(true);
+    expect(resultTextMentionsHost('notappareldiary.com/article/test', 'appareldiary.com')).toBe(false);
   });
 });
