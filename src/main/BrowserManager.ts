@@ -980,6 +980,189 @@ interface GoogleResultScan {
   };
 }
 
+interface GoogleAutoClickState {
+  status: 'watching' | 'blocked' | 'clicked';
+  url?: string;
+  title?: string;
+  organicIndex?: number;
+  clickPoint?: { x: number; y: number };
+}
+
+export function buildGoogleAutoClickStateScript(): string {
+  return `(function() {
+    var state = window.__proxydeskSeoAutoClick;
+    if (!state) return null;
+    return {
+      status: state.status,
+      url: state.url || undefined,
+      title: state.title || undefined,
+      organicIndex: typeof state.organicIndex === 'number' ? state.organicIndex : undefined,
+      clickPoint: state.clickPoint || undefined
+    };
+  })()`;
+}
+
+export function buildGoogleAutoClickInstallerScript(targetHost: string): string {
+  return `(function() {
+    var target = ${JSON.stringify(targetHost.toLowerCase())};
+    var displayMentionsTarget = ${resultTextMentionsHost.toString()};
+    var previous = window.__proxydeskSeoAutoClick;
+    if (previous && previous.observer && previous.observer.disconnect) previous.observer.disconnect();
+    if (previous && previous.timer) clearInterval(previous.timer);
+
+    var state = {
+      status: 'watching',
+      url: null,
+      title: null,
+      organicIndex: null,
+      clickPoint: null,
+      observer: null,
+      timer: null
+    };
+    window.__proxydeskSeoAutoClick = state;
+
+    function normalizeHost(host) {
+      return String(host || '').toLowerCase().replace(/^www\\./, '').replace(/\\.$/, '');
+    }
+
+    function unwrap(href) {
+      try {
+        var resolved = new URL(href, location.href);
+        var googleHost = /(^|\\.)google\\.[a-z.]+$/i.test(resolved.hostname);
+        if (googleHost && resolved.pathname === '/url') {
+          return resolved.searchParams.get('url') || resolved.searchParams.get('q') || href;
+        }
+        return resolved.href;
+      } catch (_) {
+        return href;
+      }
+    }
+
+    function destinationMatches(url) {
+      try {
+        var host = normalizeHost(new URL(url, location.href).hostname);
+        if (host === target || host.endsWith('.' + target)) return true;
+        if (target.indexOf('.') === -1 && host.split('.').indexOf(target) !== -1) return true;
+        return false;
+      } catch (_) {
+        return false;
+      }
+    }
+
+    function isVisible(node) {
+      if (!node || !node.getBoundingClientRect) return false;
+      var r = node.getBoundingClientRect();
+      return r.width > 2 && r.height > 2 && r.bottom >= 0 && r.right >= 0 &&
+        r.top <= window.innerHeight && r.left <= window.innerWidth;
+    }
+
+    function cardFor(anchor) {
+      if (!anchor) return null;
+      var direct = anchor.closest && anchor.closest('.MjjYud, .g, [data-snhf], [data-hveid]');
+      if (direct) return direct;
+      var current = anchor;
+      for (var depth = 0; current && depth < 8; depth += 1, current = current.parentElement) {
+        var text = ((current && current.innerText) || '').slice(0, 2200);
+        if (displayMentionsTarget(text, target)) return current;
+      }
+      return anchor.parentElement || anchor;
+    }
+
+    function stopWatching() {
+      if (state.observer && state.observer.disconnect) state.observer.disconnect();
+      if (state.timer) clearInterval(state.timer);
+      state.observer = null;
+      state.timer = null;
+    }
+
+    function scanAndClick() {
+      try {
+        if (/\\/sorry\\/|consent\\.google\\./.test(location.href)) {
+          state.status = 'blocked';
+          stopWatching();
+          return true;
+        }
+        var bodyText = (document.body && document.body.innerText) || '';
+        if (/unusual traffic|not a robot|recaptcha/i.test(bodyText.slice(0, 3500))) {
+          state.status = 'blocked';
+          stopWatching();
+          return true;
+        }
+
+        var root = document.querySelector('#search') || document.querySelector('#rso') || document.querySelector('main') || document.body;
+        if (!root || !root.querySelectorAll) return false;
+        var anchors = Array.prototype.slice.call(root.querySelectorAll('a[href]'));
+        var candidates = [];
+
+        for (var i = 0; i < anchors.length; i += 1) {
+          var anchor = anchors[i];
+          if (!isVisible(anchor)) continue;
+          var destination = unwrap(anchor.getAttribute('href') || anchor.href || '');
+          var card = cardFor(anchor);
+          var cardText = ((card && card.innerText) || anchor.innerText || '').slice(0, 2200);
+          if (/\\bSponsored\\b/i.test(cardText.slice(0, 260))) continue;
+          var direct = destinationMatches(destination);
+          var cardMatch = displayMentionsTarget(cardText, target);
+          if (!direct && !cardMatch) continue;
+
+          var text = (anchor.innerText || anchor.getAttribute('aria-label') || '').trim();
+          var heading = anchor.querySelector && anchor.querySelector('h3');
+          var score = 0;
+          if (heading) score += 120;
+          if (direct) score += 60;
+          if (text.length >= 18 && !displayMentionsTarget(text, target)) score += 45;
+          try {
+            var parsed = new URL(destination, location.href);
+            if (direct && parsed.pathname && parsed.pathname !== '/') score += 40;
+          } catch (_) {}
+          candidates.push({ anchor: anchor, destination: destination, score: score, index: i, title: ((heading && heading.innerText) || text).trim() });
+        }
+
+        if (!candidates.length) return false;
+        candidates.sort(function(a, b) { return b.score - a.score; });
+        var chosen = candidates[0];
+        var rect = chosen.anchor.getBoundingClientRect();
+        state.status = 'clicked';
+        state.url = chosen.destination;
+        state.title = chosen.title;
+        state.organicIndex = chosen.index;
+        state.clickPoint = { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+        stopWatching();
+
+        try { chosen.anchor.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'auto' }); } catch (_) {}
+        try { chosen.anchor.target = '_self'; } catch (_) {}
+        try { chosen.anchor.focus({ preventScroll: true }); } catch (_) {}
+        try { chosen.anchor.click(); } catch (_) {}
+
+        // Hard fallback: only after the actual Google result anchor has been
+        // identified and clicked. If Google's handlers ignore the synthetic
+        // click, follow that exact result URL from the SERP shortly after.
+        setTimeout(function() {
+          try {
+            if (/^https?:\\/\\/(?:[^.]+\\.)?google\\./i.test(location.href)) {
+              location.assign(chosen.destination);
+            }
+          } catch (_) {}
+        }, 300);
+        return true;
+      } catch (_) {
+        return false;
+      }
+    }
+
+    if (!scanAndClick()) {
+      var observeRoot = document.documentElement || document.body;
+      if (observeRoot && typeof MutationObserver !== 'undefined') {
+        state.observer = new MutationObserver(function() { scanAndClick(); });
+        state.observer.observe(observeRoot, { childList: true, subtree: true, characterData: true });
+      }
+      state.timer = setInterval(scanAndClick, 75);
+    }
+
+    return { status: state.status, url: state.url, title: state.title, organicIndex: state.organicIndex, clickPoint: state.clickPoint };
+  })()`;
+}
+
 export function buildGoogleResultScanScript(targetHost: string): string {
   return `(function() {
     try {
