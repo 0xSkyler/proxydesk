@@ -30,6 +30,7 @@ export declare interface SeoAutomationManager {
  * -> Google result-page scan -> matched result click -> Keep Alive
  * -> rotate and repeat on the user-configured cadence.
  */
+// eslint-disable-next-line @typescript-eslint/no-unsafe-declaration-merging
 export class SeoAutomationManager extends EventEmitter {
   private timer: NodeJS.Timeout | null = null;
   private generation = 0;
