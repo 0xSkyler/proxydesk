@@ -2,12 +2,12 @@
   "name": "proxydesk",
   "productName": "ProxyDesk",
   "version": "0.3.5",
-  "description": "ProxyDesk SEO with autonomous proxy-file validation, immediate live assignment, SEO tracking and enhanced Keep Alive.",
+  "description": "Lightweight SEO tracker with ProxyScrape API sourcing, proxy validation, rotation, multi-page Google result scanning, and Keep Alive.",
   "author": "ProxyDesk",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/your-org/proxydesk.git"
+    "url": "https://github.com/0xSkyler/proxydesk.git"
   },
   "main": "dist/main/main.js",
   "private": true,
