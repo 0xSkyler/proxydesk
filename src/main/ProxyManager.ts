@@ -11,7 +11,7 @@ import { scoreProxy } from '../proxy/ProxyScorer';
 import { fetchProxyScrapeFreeList } from '../proxy/ProxyScrapeProvider';
 import { logger } from './Logger';
 
-const VALIDATION_TIMEOUT_MS = 6000;
+const VALIDATION_TIMEOUT_MS = 4000;
 const MAX_CONCURRENT_CHECKS = 32;
 const IP_CHECK_URL = 'https://api.ipify.org?format=json';
 
