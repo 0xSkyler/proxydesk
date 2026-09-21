@@ -498,7 +498,7 @@ export class BrowserManager extends EventEmitter {
     id: number,
     query: string,
     targetWebsite: string,
-    maxPages = 5
+    maxPages = 20
   ): Promise<BroadcastSearchResult> {
     const managed = this.get(id);
     const wc = managed.view.webContents;
@@ -506,261 +506,122 @@ export class BrowserManager extends EventEmitter {
     const targetHost = normalizeTargetHost(targetWebsite);
 
     if (!targetHost) {
-      return { browserId: id, status: 'error', error: 'Enter a valid target website or domain.', ranAt };
+      return {
+        browserId: id,
+        status: 'error',
+        error: 'Enter a valid target website or site name.',
+        ranAt
+      };
     }
 
-    const pagesToScan = Math.max(1, Math.min(10, Math.floor(maxPages || 1)));
+    const pagesToScan = Math.max(1, Math.min(100, Math.floor(maxPages || 1)));
     let totalScanned = 0;
     let lastSearchUrl = '';
+
+    /**
+     * Load only enough of a Google result page to make the DOM available.
+     * We explicitly stop the remaining resource load; SEO scanning must never
+     * wait for a slow proxy to finish images/scripts after results are visible.
+     */
+    const loadSearchDom = async (url: string): Promise<void> => {
+      let ready = false;
+      const onDomReady = () => {
+        if (isGoogleSearchResultsUrl(wc.getURL())) ready = true;
+      };
+      wc.on('dom-ready', onDomReady);
+
+      let loadError: string | null = null;
+      void wc.loadURL(url).catch((err) => {
+        const message = (err as Error).message || String(err);
+        if (!/ERR_ABORTED|-3/i.test(message)) loadError = message;
+      });
+
+      const deadline = Date.now() + 5_000;
+      while (Date.now() < deadline) {
+        const current = wc.getURL();
+        if (extractGoogleBlockContinueUrl(current)) break;
+        if (ready || (isGoogleSearchResultsUrl(current) && !wc.isLoading())) break;
+        if (loadError) break;
+        await delay(25);
+      }
+
+      // Give Google's server-rendered result markup a small paint window,
+      // then release executeJavaScript by cancelling unfinished subresources.
+      if (ready) await delay(160);
+      if (wc.isLoading()) wc.stop();
+      await delay(25);
+
+      wc.removeListener('dom-ready', onDomReady);
+      if (loadError && !isGoogleSearchResultsUrl(wc.getURL())) {
+        throw new Error(loadError);
+      }
+    };
 
     for (let pageIndex = 0; pageIndex < pagesToScan; pageIndex += 1) {
       const searchUrl = buildGoogleSearchUrl(query, pageIndex);
       lastSearchUrl = searchUrl;
 
-      // IMPORTANT: do not await loadURL here. Electron resolves loadURL only
-      // after navigation finishes, but Google results can already be visible
-      // and clickable long before images/scripts/other resources finish.
-      //
-      // Electron also queues executeJavaScript while a navigation is still
-      // loading. With slow proxies that left ProxyDesk stuck even though the
-      // organic result was visibly painted. Watch DOM readiness instead and
-      // deliberately stop the remaining Google resource load after a very
-      // short paint grace. That releases executeJavaScript immediately.
-      let navigationErrorMessage: string | null = null;
-      let googleDomReady = false;
-      let googleLoadStopped = false;
-      let stopGoogleTimer: NodeJS.Timeout | null = null;
-
-      const onGoogleDomReady = () => {
-        if (!isGoogleSearchResultsUrl(wc.getURL())) return;
-        googleDomReady = true;
-        if (stopGoogleTimer) clearTimeout(stopGoogleTimer);
-        stopGoogleTimer = setTimeout(() => {
-          stopGoogleTimer = null;
-          if (!isGoogleSearchResultsUrl(wc.getURL())) return;
-          if (wc.isLoading()) wc.stop();
-          googleLoadStopped = true;
-        }, 180);
-      };
-
-      wc.on('dom-ready', onGoogleDomReady);
-
-      void wc.loadURL(searchUrl).catch((err) => {
-        const message = (err as Error).message || String(err);
-        // Clicking a result while Google is still loading intentionally
-        // aborts the original search navigation. That is a success path.
-        if (!/ERR_ABORTED|-3/i.test(message)) navigationErrorMessage = message;
-      });
-
-      const scanDeadline = Date.now() + 12_000;
-      let latestScan: GoogleResultScan = { blocked: false, ready: false, resultsScanned: 0 };
-      let pageMaxScanned = 0;
-      let googleCommitted = false;
-      let googleCommittedAt: number | null = null;
-      let autoClickInstalled = false;
-      let autoClickTriggered = false;
-
-      while (Date.now() < scanDeadline) {
-        const currentUrl = wc.getURL();
-
-        // The URL commits before the full page finishes loading. As soon as
-        // that happens we can inspect Google's progressively-rendered DOM.
-        if (extractGoogleBlockContinueUrl(currentUrl)) {
-          return {
-            browserId: id,
-            status: 'blocked',
-            landedUrl: currentUrl,
-            resultsScanned: totalScanned + pageMaxScanned,
-            ranAt
-          };
-        }
-
-        if (!isGoogleSearchResultsUrl(currentUrl)) {
-          // If the in-page watcher already followed the matching Google
-          // result, recognize success immediately even if its JS context
-          // disappeared before it could report the click back to Electron.
-          if (hostMatchesTarget(currentUrl, targetHost)) {
-            wc.removeListener('dom-ready', onGoogleDomReady);
-            if (stopGoogleTimer) clearTimeout(stopGoogleTimer);
-            this.setBrowserKeepAlive(id, true, true);
-            return {
-              browserId: id,
-              status: 'matched',
-              landedUrl: currentUrl,
-              resultsScanned: totalScanned + pageMaxScanned,
-              resultPage: pageIndex + 1,
-              keepAliveStarted: true,
-              ranAt
-            };
-          }
-
-          // During the short handoff from the previous document to Google,
-          // executeJavaScript would still address the old/destroyed world.
-          if (navigationErrorMessage) {
-            return {
-              browserId: id,
-              status: 'error',
-              error: `Failed to load Google results page ${pageIndex + 1}: ${navigationErrorMessage}`,
-              ranAt
-            };
-          }
-          await delay(50);
-          continue;
-        }
-
-        googleCommitted = true;
-        if (googleCommittedAt == null) googleCommittedAt = Date.now();
-
-        // Never let a slow Google subresource keep the SEO scanner blocked.
-        // Prefer the real dom-ready signal. Only if Electron somehow misses
-        // it do we force-stop after 750 ms from navigation commit.
-        if (!googleDomReady && !googleLoadStopped) {
-          if (!wc.isLoading()) {
-            // Navigation already stopped naturally; executeJavaScript is no
-            // longer blocked, so scan immediately without the fallback wait.
-            googleLoadStopped = true;
-          } else {
-            if (Date.now() - googleCommittedAt < 750) {
-              await delay(25);
-              continue;
-            }
-            if (isGoogleSearchResultsUrl(wc.getURL())) wc.stop();
-            googleLoadStopped = true;
-            await delay(20);
-          }
-        } else if (!googleLoadStopped && wc.isLoading()) {
-          await delay(25);
-          continue;
-        }
-
-        // Install one watcher inside the Google page itself. It scans the
-        // current DOM immediately, then observes mutations and also retries
-        // every 75 ms. This removes the timing gap between "result painted"
-        // and "main process asked the page to scan".
-        if (!autoClickInstalled) {
-          try {
-            const initialState = (await wc.executeJavaScript(
-              buildGoogleAutoClickInstallerScript(targetHost),
-              true
-            )) as GoogleAutoClickState | null;
-            autoClickInstalled = true;
-
-            if (initialState?.status === 'blocked') {
-              return {
-                browserId: id,
-                status: 'blocked',
-                landedUrl: wc.getURL(),
-                resultsScanned: totalScanned + pageMaxScanned,
-                ranAt
-              };
-            }
-
-            if (initialState?.status === 'clicked' && initialState.url) {
-              latestScan = {
-                blocked: false,
-                ready: true,
-                resultsScanned: Math.max(1, (initialState.organicIndex ?? 0) + 1),
-                match: {
-                  url: initialState.url,
-                  title: initialState.title ?? '',
-                  organicIndex: initialState.organicIndex ?? 0,
-                  clickPoint: initialState.clickPoint
-                }
-              };
-              pageMaxScanned = Math.max(pageMaxScanned, latestScan.resultsScanned);
-              autoClickTriggered = true;
-              break;
-            }
-          } catch {
-            await delay(60);
-            continue;
-          }
-        } else {
-          try {
-            const watcherState = (await wc.executeJavaScript(buildGoogleAutoClickStateScript())) as GoogleAutoClickState | null;
-            if (watcherState?.status === 'blocked') {
-              return {
-                browserId: id,
-                status: 'blocked',
-                landedUrl: wc.getURL(),
-                resultsScanned: totalScanned + pageMaxScanned,
-                ranAt
-              };
-            }
-            if (watcherState?.status === 'clicked' && watcherState.url) {
-              latestScan = {
-                blocked: false,
-                ready: true,
-                resultsScanned: Math.max(1, (watcherState.organicIndex ?? 0) + 1),
-                match: {
-                  url: watcherState.url,
-                  title: watcherState.title ?? '',
-                  organicIndex: watcherState.organicIndex ?? 0,
-                  clickPoint: watcherState.clickPoint
-                }
-              };
-              pageMaxScanned = Math.max(pageMaxScanned, latestScan.resultsScanned);
-              autoClickTriggered = true;
-              break;
-            }
-          } catch {
-            // A navigation can replace the Google document between reads.
-          }
-        }
-
-        try {
-          latestScan = (await wc.executeJavaScript(buildGoogleResultScanScript(targetHost))) as GoogleResultScan;
-        } catch {
-          // Chromium may replace the document between navigation commit and
-          // the first rendered result. This is transient, not a failed SEO
-          // run. Retry aggressively until result anchors become available.
-          await delay(80);
-          continue;
-        }
-
-        if (latestScan.blocked) {
-          return {
-            browserId: id,
-            status: 'blocked',
-            landedUrl: wc.getURL(),
-            resultsScanned: totalScanned + pageMaxScanned,
-            ranAt
-          };
-        }
-
-        pageMaxScanned = Math.max(pageMaxScanned, latestScan.resultsScanned);
-        if (latestScan.match) break;
-
-        // Once any result markup exists, check essentially in real time.
-        // Do not wait for document.readyState === complete.
-        await delay(latestScan.ready ? 100 : 80);
-      }
-
-      if (!googleCommitted && navigationErrorMessage) {
+      try {
+        await loadSearchDom(searchUrl);
+      } catch (err) {
         return {
           browserId: id,
           status: 'error',
-          error: `Failed to load Google results page ${pageIndex + 1}: ${navigationErrorMessage}`,
+          error: `Failed to open Google result page ${pageIndex + 1}: ${(err as Error).message}`,
           ranAt
         };
       }
 
-      wc.removeListener('dom-ready', onGoogleDomReady);
-      if (stopGoogleTimer) {
-        clearTimeout(stopGoogleTimer);
-        stopGoogleTimer = null;
+      const currentUrl = wc.getURL();
+      if (extractGoogleBlockContinueUrl(currentUrl)) {
+        return {
+          browserId: id,
+          status: 'blocked',
+          landedUrl: currentUrl,
+          resultsScanned: totalScanned,
+          ranAt
+        };
       }
 
-      totalScanned += pageMaxScanned;
-      if (!latestScan.match) continue;
+      // After stop(), script execution is no longer queued behind Google's
+      // unfinished network load. Scan the current page immediately.
+      let scan: GoogleResultScan = { blocked: false, ready: false, resultsScanned: 0 };
+      const scanDeadline = Date.now() + 1_500;
+      while (Date.now() < scanDeadline) {
+        try {
+          scan = (await wc.executeJavaScript(
+            buildGoogleResultScanScript(targetHost),
+            true
+          )) as GoogleResultScan;
+        } catch {
+          await delay(50);
+          continue;
+        }
 
-      let clicked = autoClickTriggered;
-      const point = latestScan.match.clickPoint;
+        if (scan.blocked) {
+          return {
+            browserId: id,
+            status: 'blocked',
+            landedUrl: wc.getURL(),
+            resultsScanned: totalScanned,
+            ranAt
+          };
+        }
+
+        if (scan.match || scan.ready) break;
+        await delay(60);
+      }
+
+      totalScanned += scan.resultsScanned;
+      if (!scan.match) {
+        // The page was genuinely scanned and contained no target. Only now
+        // may the next Google result page be requested.
+        continue;
+      }
+
+      let clicked = false;
+      const point = scan.match.clickPoint;
       if (point && Number.isFinite(point.x) && Number.isFinite(point.y)) {
-        // Send a native Chromium mouse gesture directly to the BrowserView.
-        // This does not depend on Google's JS click handlers accepting a
-        // synthetic HTMLElement.click() and works with separately-rendered
-        // domain/title markup like the current desktop SERP.
         const x = Math.max(1, Math.round(point.x));
         const y = Math.max(1, Math.round(point.y));
         wc.sendInputEvent({ type: 'mouseMove', x, y });
@@ -769,8 +630,6 @@ export class BrowserManager extends EventEmitter {
         clicked = true;
       }
 
-      // DOM click is retained only as a fallback for unusual layouts where
-      // the target is detectable but Chromium does not expose a usable rect.
       if (!clicked) {
         clicked = (await wc
           .executeJavaScript(buildClickGoogleTargetResultScript(targetHost), true)
@@ -781,47 +640,72 @@ export class BrowserManager extends EventEmitter {
         return {
           browserId: id,
           status: 'error',
-          error: `Found "${latestScan.match.title}" on Google page ${pageIndex + 1}, but could not click it.`,
+          error: `Found "${scan.match.title}" on Google page ${pageIndex + 1}, but could not click it.`,
           landedUrl: wc.getURL(),
           resultsScanned: totalScanned,
           ranAt
         };
       }
 
-      // Once Google has identified the actual result URL, verify against
-      // that concrete hostname. This is important when the user entered a
-      // website name like "appareldiary" instead of "appareldiary.com".
-      const verificationTarget = normalizeTargetHost(latestScan.match.url) || targetHost;
-      const deadline = Date.now() + 15_000;
+      const verificationTarget = normalizeTargetHost(scan.match.url) || targetHost;
+      const landingDeadline = Date.now() + 8_000;
       let landedUrl = wc.getURL();
-      while (Date.now() < deadline) {
-        await delay(120);
+
+      while (Date.now() < landingDeadline) {
+        await delay(80);
         landedUrl = wc.getURL();
         if (hostMatchesTarget(landedUrl, verificationTarget)) break;
+      }
+
+      // If Google's click handler ignored the synthetic/native click, follow
+      // the exact URL extracted from that matched Google result. We never
+      // construct or guess a target URL.
+      if (!hostMatchesTarget(landedUrl, verificationTarget) && isGoogleSearchResultsUrl(landedUrl)) {
+        try {
+          await wc.executeJavaScript(
+            `location.assign(${JSON.stringify(scan.match.url)})`,
+            true
+          );
+        } catch {
+          // The navigation can destroy the execution context; continue below.
+        }
+
+        const fallbackDeadline = Date.now() + 5_000;
+        while (Date.now() < fallbackDeadline) {
+          await delay(80);
+          landedUrl = wc.getURL();
+          if (hostMatchesTarget(landedUrl, verificationTarget)) break;
+        }
       }
 
       if (!hostMatchesTarget(landedUrl, verificationTarget)) {
         return {
           browserId: id,
           status: 'error',
-          error: `Google result was clicked, but the browser did not land on ${verificationTarget} within 15 seconds.`,
+          error: `Matched the Google result but did not land on ${verificationTarget}.`,
           landedUrl,
-          matchedTitle: latestScan.match.title,
+          matchedTitle: scan.match.title,
           resultsScanned: totalScanned,
-          position: pageIndex * 10 + latestScan.match.organicIndex + 1,
+          position: pageIndex * 10 + scan.match.organicIndex + 1,
           resultPage: pageIndex + 1,
           ranAt
         };
       }
+
+      // Keep Alive should not wait on a slow article load either. Allow the
+      // article DOM a moment to render, then stop remaining resources.
+      const articleDeadline = Date.now() + 1_200;
+      while (wc.isLoading() && Date.now() < articleDeadline) await delay(50);
+      if (wc.isLoading()) wc.stop();
 
       this.setBrowserKeepAlive(id, true, true);
       return {
         browserId: id,
         status: 'matched',
         landedUrl,
-        matchedTitle: latestScan.match.title,
+        matchedTitle: scan.match.title,
         resultsScanned: totalScanned,
-        position: pageIndex * 10 + latestScan.match.organicIndex + 1,
+        position: pageIndex * 10 + scan.match.organicIndex + 1,
         resultPage: pageIndex + 1,
         keepAliveStarted: true,
         ranAt
