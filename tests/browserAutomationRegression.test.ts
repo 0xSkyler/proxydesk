@@ -195,6 +195,9 @@ describe('browser automation regressions', () => {
       getURL: () => currentUrl,
       isDestroyed: () => false,
       isLoading: () => false,
+      on: vi.fn(),
+      removeListener: vi.fn(),
+      stop: vi.fn(),
       executeJavaScript
     };
     const managed = {
@@ -233,6 +236,102 @@ describe('browser automation regressions', () => {
 
     if (internals.keepAliveTimer) clearInterval(internals.keepAliveTimer);
   });
+  it('stops a still-loading Google page at dom-ready and never paginates past a visible first-page target', async () => {
+    const targetUrl = 'https://appareldiary.com/article/rmg-cutting';
+    let currentUrl = 'about:blank';
+    let loading = false;
+    let stopped = false;
+    const handlers = new Map<string, Set<() => void>>();
+
+    const emit = (event: string) => {
+      for (const handler of handlers.get(event) ?? []) handler();
+    };
+    const on = vi.fn((event: string, handler: () => void) => {
+      const set = handlers.get(event) ?? new Set<() => void>();
+      set.add(handler);
+      handlers.set(event, set);
+    });
+    const removeListener = vi.fn((event: string, handler: () => void) => {
+      handlers.get(event)?.delete(handler);
+    });
+
+    const loadURL = vi.fn().mockImplementation((url: string) => {
+      currentUrl = url;
+      loading = true;
+      setTimeout(() => emit('dom-ready'), 5);
+      // Simulate a proxy that leaves Google loading forever.
+      return new Promise<void>(() => undefined);
+    });
+    const stop = vi.fn(() => {
+      loading = false;
+      stopped = true;
+    });
+    const executeJavaScript = vi.fn().mockImplementation(async (script: string) => {
+      if (!stopped) return new Promise<never>(() => undefined);
+      if (script.includes('__proxydeskSeoAutoClick')) {
+        currentUrl = targetUrl;
+        return {
+          status: 'clicked',
+          url: targetUrl,
+          title: 'RMG Cutting Process: A Stage-by-Stage Control Guide',
+          organicIndex: 0
+        };
+      }
+      return {
+        blocked: false,
+        ready: true,
+        resultsScanned: 1,
+        match: { url: targetUrl, title: 'RMG Cutting Process: A Stage-by-Stage Control Guide', organicIndex: 0 }
+      };
+    });
+
+    const webContents = {
+      loadURL,
+      getURL: () => currentUrl,
+      isDestroyed: () => false,
+      isLoading: () => loading,
+      on,
+      removeListener,
+      stop,
+      executeJavaScript,
+      sendInputEvent: vi.fn()
+    };
+    const managed = {
+      id: 10,
+      view: { webContents },
+      session: {},
+      state: { id: 10, keepAliveEnabled: false, keepAliveHops: 0, loading: true },
+      restartAttempts: 0,
+      googleBlockRetries: 0,
+      keepAliveEnabled: false,
+      keepAliveHops: 0,
+      keepAliveNextAt: 0,
+      keepAliveBusy: false,
+      keepAliveVisited: new Set<string>()
+    };
+
+    const manager = new BrowserManager();
+    const internals = manager as unknown as {
+      browsers: Map<number, unknown>;
+      keepAliveTimer: NodeJS.Timeout | null;
+    };
+    internals.browsers.set(10, managed);
+
+    const result = await Promise.race([
+      manager.broadcastSearch(10, 'rmg cutting', 'appareldiary.com', 5),
+      new Promise<never>((_resolve, reject) =>
+        setTimeout(() => reject(new Error('SEO scanner stayed blocked behind Google loading')), 900)
+      )
+    ]);
+
+    expect(stop).toHaveBeenCalled();
+    expect(loadURL).toHaveBeenCalledTimes(1);
+    expect(result.status).toBe('matched');
+    expect(result.resultPage).toBe(1);
+    expect(result.landedUrl).toBe(targetUrl);
+
+    if (internals.keepAliveTimer) clearInterval(internals.keepAliveTimer);
+  });
   it('uses a native WebContents mouse click when the target result exposes coordinates', async () => {
     const targetUrl = 'https://appareldiary.com/article/rmg-cutting';
     let currentUrl = 'https://www.google.com/search?q=rmg+cutting';
@@ -243,6 +342,9 @@ describe('browser automation regressions', () => {
       getURL: () => currentUrl,
       isDestroyed: () => false,
       isLoading: () => false,
+      on: vi.fn(),
+      removeListener: vi.fn(),
+      stop: vi.fn(),
       executeJavaScript: vi.fn().mockResolvedValue({
         blocked: false,
         ready: true,
