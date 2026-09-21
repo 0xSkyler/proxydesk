@@ -615,13 +615,19 @@ export class BrowserManager extends EventEmitter {
         // Prefer the real dom-ready signal. Only if Electron somehow misses
         // it do we force-stop after 750 ms from navigation commit.
         if (!googleDomReady && !googleLoadStopped) {
-          if (Date.now() - googleCommittedAt < 750) {
-            await delay(25);
-            continue;
+          if (!wc.isLoading()) {
+            // Navigation already stopped naturally; executeJavaScript is no
+            // longer blocked, so scan immediately without the fallback wait.
+            googleLoadStopped = true;
+          } else {
+            if (Date.now() - googleCommittedAt < 750) {
+              await delay(25);
+              continue;
+            }
+            if (isGoogleSearchResultsUrl(wc.getURL())) wc.stop();
+            googleLoadStopped = true;
+            await delay(20);
           }
-          if (isGoogleSearchResultsUrl(wc.getURL()) && wc.isLoading()) wc.stop();
-          googleLoadStopped = true;
-          await delay(20);
         } else if (!googleLoadStopped && wc.isLoading()) {
           await delay(25);
           continue;
