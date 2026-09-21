@@ -9,13 +9,69 @@ vi.mock('electron', () => ({
   session: { fromPartition: vi.fn() }
 }));
 
-import { BrowserManager, buildGoogleResultScanScript } from '../src/main/BrowserManager';
+import {
+  BrowserManager,
+  buildGoogleAutoClickInstallerScript,
+  buildGoogleResultScanScript
+} from '../src/main/BrowserManager';
 
 afterEach(() => {
   vi.restoreAllMocks();
 });
 
 describe('browser automation regressions', () => {
+  it('installs an in-page watcher that clicks an already-visible result immediately', () => {
+    const targetUrl = 'https://appareldiary.com/article/rmg-cutting';
+    const click = vi.fn();
+    const rect = { left: 80, top: 280, width: 520, height: 36, right: 600, bottom: 316 };
+    const anchor = {
+      href: targetUrl,
+      innerText: 'RMG Cutting Process: A Stage-by-Stage Control Guide',
+      target: '',
+      getAttribute: (name: string) => (name === 'href' ? targetUrl : null),
+      getBoundingClientRect: () => rect,
+      querySelector: () => ({ innerText: 'RMG Cutting Process: A Stage-by-Stage Control Guide' }),
+      closest: () => resultCard,
+      parentElement: null,
+      scrollIntoView: vi.fn(),
+      focus: vi.fn(),
+      click
+    };
+    const resultCard = {
+      innerText: 'appareldiary.com\nRMG Cutting Process: A Stage-by-Stage Control Guide',
+      parentElement: null
+    };
+    const root = { querySelectorAll: (selector: string) => (selector === 'a[href]' ? [anchor] : []) };
+    const document = {
+      body: { innerText: 'Google Search results' },
+      documentElement: {},
+      querySelector: (selector: string) => (selector === '#search' ? root : null)
+    };
+    const location = {
+      href: 'https://www.google.com/search?q=rmg+cutting',
+      assign: vi.fn((url: string) => { location.href = url; })
+    };
+    class MutationObserverStub {
+      observe() {}
+      disconnect() {}
+    }
+
+    const state = vm.runInNewContext(buildGoogleAutoClickInstallerScript('appareldiary'), {
+      window: { location, innerHeight: 800, innerWidth: 1200 },
+      location,
+      document,
+      URL,
+      MutationObserver: MutationObserverStub,
+      setInterval: () => 1,
+      clearInterval: () => undefined,
+      setTimeout: () => 1
+    }) as { status: string; url?: string; title?: string };
+
+    expect(state.status).toBe('clicked');
+    expect(state.url).toBe(targetUrl);
+    expect(state.title).toContain('RMG Cutting Process');
+    expect(click).toHaveBeenCalledTimes(1);
+  });
   it('arms and executes Keep Alive from the individual browser control', async () => {
     const executeJavaScript = vi.fn().mockResolvedValue({ links: [] });
     const webContents = {
