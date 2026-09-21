@@ -1051,19 +1051,32 @@ export function buildGoogleResultScanScript(targetHost: string): string {
             if (candidates.indexOf(a) === -1) candidates.push(a);
           });
         }
-        var firstVisible = null;
+        var best = null;
+        var bestScore = -1;
         for (var j = 0; j < candidates.length; j += 1) {
           var a = candidates[j];
-          var rect = visibleRect(a);
-          if (!rect) continue;
-          if (!firstVisible) firstVisible = a;
+          if (!visibleRect(a)) continue;
           var destination = unwrap(a.getAttribute('href') || a.href || '');
-          if (destinationMatches(destination)) return a;
-          if (a.querySelector('h3')) return a;
           var text = (a.innerText || a.getAttribute('aria-label') || '').trim();
-          if (text.length > 8 && !displayMentionsTarget(text, target)) return a;
+          var hasHeading = Boolean(a.querySelector && a.querySelector('h3'));
+          var direct = destinationMatches(destination);
+          var score = 0;
+          if (hasHeading) score += 100;
+          if (direct) score += 40;
+          if (text.length >= 18 && !displayMentionsTarget(text, target)) score += 35;
+          try {
+            var parsedDestination = new URL(destination, location.href);
+            if (direct && parsedDestination.pathname && parsedDestination.pathname !== '/') score += 30;
+          } catch (_) {
+            // Ignore malformed candidate URLs.
+          }
+          if (a === seedAnchor) score += 1;
+          if (score > bestScore) {
+            best = a;
+            bestScore = score;
+          }
         }
-        return firstVisible;
+        return best;
       }
 
       var anchors = Array.prototype.slice.call(searchRoot ? searchRoot.querySelectorAll('a[href]') : []);
