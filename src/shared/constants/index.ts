@@ -18,4 +18,4 @@ export const DEFAULT_PROXY_TIMEOUT_MS = 8000;
  * chosen generously above the old fixed 10 so "sometimes I need more than
  * 10" is possible, without letting the count field accept something that
  * would just crash the machine. */
-export const MAX_BROWSER_COUNT = 50;
+export const MAX_BROWSER_COUNT = 100;
