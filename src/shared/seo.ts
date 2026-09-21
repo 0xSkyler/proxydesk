@@ -17,7 +17,13 @@ export function hostMatchesTarget(url: string, targetWebsite: string): boolean {
 
   try {
     const host = new URL(url).hostname.toLowerCase().replace(/^www\./, '').replace(/\.$/, '');
-    return host === target || host.endsWith(`.${target}`);
+    if (host === target || host.endsWith(`.${target}`)) return true;
+
+    // The UI accepts a website name as well as a full domain. If the user
+    // enters "appareldiary", allow a real Google result hosted on
+    // "appareldiary.com" (or a subdomain containing that label) to match.
+    if (!target.includes('.')) return host.split('.').includes(target);
+    return false;
   } catch {
     return false;
   }
@@ -45,7 +51,12 @@ export function resultTextMentionsHost(text: string, normalizedTargetHost: strin
     .map((token) => token.replace(/^["'<>]+|["'<>.]+$/g, ''))
     .filter(Boolean);
 
-  return tokens.some((token) => token === target || token.endsWith(`.${target}`));
+  const bareSiteName = !target.includes('.');
+  return tokens.some((token) =>
+    token === target ||
+    token.endsWith(`.${target}`) ||
+    (bareSiteName && token.startsWith(`${target}.`))
+  );
 }
 
 export function buildGoogleSearchUrl(query: string, pageIndex = 0): string {
