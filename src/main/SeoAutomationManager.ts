@@ -1,19 +1,21 @@
 import { EventEmitter } from 'node:events';
-import { promises as fs } from 'node:fs';
 import type { ProxyAssignment } from '../shared/types/proxy';
 import type {
   SeoAutomationConfig,
   SeoAutomationResult,
   SeoAutomationState
 } from '../shared/types/automation';
-import { normalizeAutomationIntervalSeconds } from '../shared/types/automation';
+import {
+  normalizeAutomationIntervalSeconds,
+  normalizeBrowserCount,
+  normalizeSeoMaxPages
+} from '../shared/types/automation';
 import { normalizeTargetHost } from '../shared/seo';
 import type { BrowserManager } from './BrowserManager';
 import type { ProxyManager } from './ProxyManager';
-import type { SettingsManager } from './SettingsManager';
 import { logger } from './Logger';
 
-// eslint-disable-next-line @typescript-eslint/no-unsafe-declaration-merging -- standard Node EventEmitter typed-events pattern
+// eslint-disable-next-line @typescript-eslint/no-unsafe-declaration-merging
 export declare interface SeoAutomationManager {
   on(event: 'stateChanged', listener: (state: SeoAutomationState) => void): this;
   emit(event: 'stateChanged', state: SeoAutomationState): boolean;
@@ -22,15 +24,12 @@ export declare interface SeoAutomationManager {
 }
 
 /**
- * Session-only orchestration for:
- *   proxy file -> streaming validation -> immediate assignment -> Google SEO
- *   search -> target-result click -> enhanced Keep Alive.
+ * Single-purpose SEO Tracker orchestration:
  *
- * Configuration is intentionally kept only in memory so closing ProxyDesk
- * clears the selected path, query and runtime rotation state along with the
- * proxy pool.
+ * ProxyScrape free API -> local validation -> immediate exclusive assignment
+ * -> Google result-page scan -> matched result click -> Keep Alive
+ * -> rotate and repeat on the user-configured cadence.
  */
-// eslint-disable-next-line @typescript-eslint/no-unsafe-declaration-merging -- standard Node EventEmitter typed-events pattern
 export class SeoAutomationManager extends EventEmitter {
   private timer: NodeJS.Timeout | null = null;
   private generation = 0;
@@ -39,12 +38,15 @@ export class SeoAutomationManager extends EventEmitter {
   private state: SeoAutomationState = {
     running: false,
     cycleInProgress: false,
-    sourceFilePath: null,
+    proxySource: 'ProxyScrape Free API',
     query: '',
     targetWebsite: '',
     intervalSec: 600,
+    browserCount: 10,
+    maxPages: 20,
     browserIds: [],
     cycleNumber: 0,
+    fetchedProxies: 0,
     checkedProxies: 0,
     totalProxies: 0,
     liveProxies: 0,
@@ -54,17 +56,13 @@ export class SeoAutomationManager extends EventEmitter {
   constructor(
     private readonly proxyManager: ProxyManager,
     private readonly browserManager: BrowserManager,
-    private readonly settingsManager: SettingsManager,
-    private readonly getActiveBrowserIds: () => number[]
+    private readonly ensureBrowserCount: (count: number) => Promise<number[]>
   ) {
     super();
   }
 
   getState(): SeoAutomationState {
-    return {
-      ...this.state,
-      browserIds: [...this.state.browserIds]
-    };
+    return { ...this.state, browserIds: [...this.state.browserIds] };
   }
 
   isRunning(): boolean {
@@ -72,40 +70,35 @@ export class SeoAutomationManager extends EventEmitter {
   }
 
   async start(config: SeoAutomationConfig): Promise<SeoAutomationState> {
-    const sourceFilePath = config.sourceFilePath.trim();
     const query = config.query.trim();
     const targetWebsite = config.targetWebsite.trim();
-
-    if (!sourceFilePath) throw new Error('Select a proxy source file first.');
-    await fs.access(sourceFilePath);
-
     if (!query) throw new Error('Enter a Google search keyword.');
-    if (!normalizeTargetHost(targetWebsite)) throw new Error('Enter a valid target website or domain.');
+    if (!normalizeTargetHost(targetWebsite)) throw new Error('Enter a valid target website or site name.');
 
-    const active = new Set(this.getActiveBrowserIds());
-    const browserIds = Array.from(new Set(config.browserIds))
-      .filter((id) => active.has(id))
-      .sort((a, b) => a - b);
-    if (browserIds.length === 0) throw new Error('Select at least one active browser.');
+    const browserCount = normalizeBrowserCount(config.browserCount);
+    const maxPages = normalizeSeoMaxPages(config.maxPages);
+    const intervalSec = normalizeAutomationIntervalSeconds(config.intervalSec);
+    const browserIds = await this.ensureBrowserCount(browserCount);
+    if (browserIds.length === 0) throw new Error('No browser workspaces are available.');
 
     this.stopTimerOnly();
     this.proxyManager.cancelCurrentValidation();
-    // A newly started autonomous run begins a fresh proxy-usage round.
-    // Subsequent timed cycles keep the ledger so proxies genuinely rotate.
-    this.proxyManager.resetAutomationRotationHistory();
+    this.proxyManager.resetRotationHistory();
     this.generation += 1;
     this.pendingCycle = false;
 
-    const intervalSec = normalizeAutomationIntervalSeconds(config.intervalSec);
     this.state = {
       running: true,
       cycleInProgress: false,
-      sourceFilePath,
+      proxySource: 'ProxyScrape Free API',
       query,
       targetWebsite,
       intervalSec,
+      browserCount,
+      maxPages,
       browserIds,
       cycleNumber: 0,
+      fetchedProxies: 0,
       checkedProxies: 0,
       totalProxies: 0,
       liveProxies: 0,
@@ -138,7 +131,7 @@ export class SeoAutomationManager extends EventEmitter {
       try {
         this.browserManager.setBrowserKeepAlive(id, false, false);
       } catch {
-        // Browser may have been removed while automation was running.
+        // Browser may already have been removed.
       }
     }
 
@@ -153,16 +146,15 @@ export class SeoAutomationManager extends EventEmitter {
   }
 
   async runNow(): Promise<SeoAutomationState> {
-    if (!this.state.running) throw new Error('Start autonomous SEO rotation first.');
+    if (!this.state.running) throw new Error('Start SEO Tracker first.');
     await this.requestCycle();
     return this.getState();
   }
 
   private stopTimerOnly(): void {
-    if (this.timer) {
-      clearInterval(this.timer);
-      this.timer = null;
-    }
+    if (!this.timer) return;
+    clearInterval(this.timer);
+    this.timer = null;
   }
 
   private emitState(): void {
@@ -179,19 +171,18 @@ export class SeoAutomationManager extends EventEmitter {
   }
 
   private async runCycle(): Promise<void> {
-    if (!this.state.running || !this.state.sourceFilePath) return;
+    if (!this.state.running) return;
 
     const generation = this.generation;
     const cycleNumber = this.state.cycleNumber + 1;
     const browserIds = [...this.state.browserIds];
-    const sourceFilePath = this.state.sourceFilePath;
-    const query = this.state.query;
-    const targetWebsite = this.state.targetWebsite;
+    const { query, targetWebsite, maxPages } = this.state;
 
     this.state = {
       ...this.state,
       cycleInProgress: true,
       cycleNumber,
+      fetchedProxies: 0,
       checkedProxies: 0,
       totalProxies: 0,
       liveProxies: 0,
@@ -204,34 +195,33 @@ export class SeoAutomationManager extends EventEmitter {
     const seoTasks: Promise<void>[] = [];
 
     try {
-      // A new cycle must use only proxies read from the selected source file.
-      // Stop Keep Alive and put selected browsers in direct mode until a
-      // freshly validated working proxy is assigned.
+      // Every rotation starts from a clean browser routing state.
       for (const id of browserIds) {
         if (!this.isCurrent(generation)) return;
-        try {
-          this.browserManager.setBrowserKeepAlive(id, false, false);
-          await this.browserManager.assignProxy(id, null);
-        } catch (err) {
-          logger.warn('browser', `Automation cycle ${cycleNumber}: failed to reset Browser ${id}: ${(err as Error).message}`);
-        }
+        this.browserManager.setBrowserKeepAlive(id, false, false);
+        await this.browserManager.assignProxy(id, null);
       }
 
-      const settings = this.settingsManager.get();
-
-      await this.proxyManager.validateFileStreaming(
-        sourceFilePath,
+      await this.proxyManager.fetchValidateAssignStreaming(
         browserIds,
-        settings.proxy.preferredCountryCode,
         (assignment) => {
           if (!this.isCurrent(generation)) return;
-          const task = this.handleAssignment(generation, cycleNumber, assignment, query, targetWebsite);
-          seoTasks.push(task);
+          seoTasks.push(
+            this.handleAssignment(
+              generation,
+              cycleNumber,
+              assignment,
+              query,
+              targetWebsite,
+              maxPages
+            )
+          );
         },
-        (checked, total, working, assigned) => {
+        (checked, total, working, assigned, fetched) => {
           if (!this.isCurrent(generation)) return;
           this.state = {
             ...this.state,
+            fetchedProxies: fetched,
             checkedProxies: checked,
             totalProxies: total,
             liveProxies: working,
@@ -250,9 +240,11 @@ export class SeoAutomationManager extends EventEmitter {
         lastCycleCompletedAt: new Date().toISOString()
       };
       this.emitState();
+
       logger.info(
         'application',
-        `Autonomous SEO cycle ${cycleNumber} complete: ${this.state.liveProxies} live proxies, ${this.state.assignedBrowsers} browser(s) assigned.`
+        `SEO cycle ${cycleNumber} complete: ${this.state.liveProxies} live, ` +
+          `${this.state.assignedBrowsers}/${browserIds.length} browser(s) assigned.`
       );
     } catch (err) {
       if (!this.isCurrent(generation)) return;
@@ -263,7 +255,7 @@ export class SeoAutomationManager extends EventEmitter {
         lastError: (err as Error).message
       };
       this.emitState();
-      logger.warn('application', `Autonomous SEO cycle ${cycleNumber} failed: ${(err as Error).message}`);
+      logger.warn('application', `SEO cycle ${cycleNumber} failed: ${(err as Error).message}`);
     } finally {
       if (this.isCurrent(generation) && this.pendingCycle) {
         this.pendingCycle = false;
@@ -277,15 +269,13 @@ export class SeoAutomationManager extends EventEmitter {
     cycleNumber: number,
     assignment: ProxyAssignment,
     query: string,
-    targetWebsite: string
+    targetWebsite: string,
+    maxPages: number
   ): Promise<void> {
     if (!assignment.proxy || !this.isCurrent(generation)) return;
 
     const { browserId, proxy } = assignment;
-
     try {
-      // Apply the live proxy immediately; do not wait for the rest of the
-      // validation batch.
       await this.browserManager.assignProxy(browserId, proxy);
       if (!this.isCurrent(generation)) return;
 
@@ -293,15 +283,11 @@ export class SeoAutomationManager extends EventEmitter {
         browserId,
         query,
         targetWebsite,
-        this.settingsManager.get().browser.seoMaxPages
+        maxPages
       );
 
       if (!this.isCurrent(generation)) {
-        try {
-          this.browserManager.setBrowserKeepAlive(browserId, false, false);
-        } catch {
-          // Browser was removed while stopping.
-        }
+        this.browserManager.setBrowserKeepAlive(browserId, false, false);
         return;
       }
 
