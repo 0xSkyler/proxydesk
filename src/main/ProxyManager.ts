@@ -5,15 +5,15 @@ import type {
   ReloadProgress,
   ReloadProxiesSummary
 } from '../shared/types/proxy';
-import type { SettingsManager } from './SettingsManager';
-import type { StorageManager } from './StorageManager';
 import { dedupeProxies, parseBulkText } from '../proxy/ProxyParser';
 import { ProxyValidator } from '../proxy/ProxyValidator';
 import { scoreProxy } from '../proxy/ProxyScorer';
 import { fetchProxyScrapeFreeList } from '../proxy/ProxyScrapeProvider';
 import { logger } from './Logger';
 
-const LEGACY_STORAGE_KEYS = ['proxies', 'imported-proxies', 'assignments'];
+const VALIDATION_TIMEOUT_MS = 6000;
+const MAX_CONCURRENT_CHECKS = 32;
+const IP_CHECK_URL = 'https://api.ipify.org?format=json';
 
 // eslint-disable-next-line @typescript-eslint/no-unsafe-declaration-merging
 export declare interface ProxyManager {
@@ -30,16 +30,7 @@ export class ProxyManager extends EventEmitter {
   private validationController: AbortController | null = null;
   private usedProxyIds = new Set<string>();
 
-  constructor(
-    private readonly storage: StorageManager,
-    private readonly settings: SettingsManager
-  ) {
-    super();
-  }
-
   async init(): Promise<void> {
-    // The Lite build is session-only. Remove state produced by older builds.
-    await Promise.all(LEGACY_STORAGE_KEYS.map((key) => this.storage.remove(key)));
     this.allProxies.clear();
     this.assignments.clear();
     this.usedProxyIds.clear();
@@ -80,12 +71,11 @@ export class ProxyManager extends EventEmitter {
     const controller = new AbortController();
     this.validationController = controller;
 
-    const settings = this.settings.get();
     const previousAssignments = new Map(this.assignments);
 
     const raw = await fetchProxyScrapeFreeList({
       limit: 2000,
-      timeoutFilterMs: Math.min(7000, settings.proxy.validationTimeoutMs),
+      timeoutFilterMs: VALIDATION_TIMEOUT_MS,
       requestTimeoutMs: 15_000,
       signal: controller.signal
     });
@@ -136,9 +126,9 @@ export class ProxyManager extends EventEmitter {
     };
 
     const results = await ProxyValidator.validateMany(candidates, {
-      timeoutMs: settings.proxy.validationTimeoutMs,
-      ipCheckUrl: settings.proxy.ipCheckUrl,
-      maxConcurrent: settings.proxy.maxConcurrentChecks,
+      timeoutMs: VALIDATION_TIMEOUT_MS,
+      ipCheckUrl: IP_CHECK_URL,
+      maxConcurrent: MAX_CONCURRENT_CHECKS,
       signal: controller.signal,
       onResult: (result, checked, resultTotal) => {
         if (controller.signal.aborted) return;
