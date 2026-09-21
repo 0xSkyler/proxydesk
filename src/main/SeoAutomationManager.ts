@@ -79,8 +79,6 @@ export class SeoAutomationManager extends EventEmitter {
     const browserCount = normalizeBrowserCount(config.browserCount);
     const maxPages = normalizeSeoMaxPages(config.maxPages);
     const intervalSec = normalizeAutomationIntervalSeconds(config.intervalSec);
-    const browserIds = await this.ensureBrowserCount(browserCount);
-    if (browserIds.length === 0) throw new Error('No browser workspaces are available.');
 
     this.stopTimerOnly();
     this.proxyManager.cancelCurrentValidation();
@@ -88,16 +86,18 @@ export class SeoAutomationManager extends EventEmitter {
     this.generation += 1;
     this.pendingCycle = false;
 
+    // Publish state before any browser preparation. The Start button therefore
+    // reacts instantly even if Electron still has browser shells to create.
     this.state = {
       running: true,
-      cycleInProgress: false,
+      cycleInProgress: true,
       proxySource: 'ProxyScrape Free API',
       query,
       targetWebsite,
       intervalSec,
       browserCount,
       maxPages,
-      browserIds,
+      browserIds: [],
       cycleNumber: 0,
       fetchedProxies: 0,
       checkedProxies: 0,
@@ -105,6 +105,40 @@ export class SeoAutomationManager extends EventEmitter {
       liveProxies: 0,
       assignedBrowsers: 0,
       nextCycleAt: new Date(Date.now() + intervalSec * 1000).toISOString()
+    };
+    this.emitState();
+
+    let browserIds: number[];
+    try {
+      browserIds = await this.ensureBrowserCount(browserCount);
+    } catch (err) {
+      this.state = {
+        ...this.state,
+        running: false,
+        cycleInProgress: false,
+        nextCycleAt: undefined,
+        lastError: `Browser preparation failed: ${(err as Error).message}`
+      };
+      this.emitState();
+      throw err;
+    }
+
+    if (browserIds.length === 0) {
+      this.state = {
+        ...this.state,
+        running: false,
+        cycleInProgress: false,
+        nextCycleAt: undefined,
+        lastError: 'No browser workspaces are available.'
+      };
+      this.emitState();
+      throw new Error('No browser workspaces are available.');
+    }
+
+    this.state = {
+      ...this.state,
+      cycleInProgress: false,
+      browserIds
     };
     this.emitState();
 
