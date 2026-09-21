@@ -72,6 +72,58 @@ describe('browser automation regressions', () => {
     expect(state.title).toContain('RMG Cutting Process');
     expect(click).toHaveBeenCalledTimes(1);
   });
+  it('hard-follows the exact matched SERP URL when Google ignores the page click', () => {
+    const targetUrl = 'https://appareldiary.com/article/rmg-cutting';
+    const click = vi.fn();
+    const rect = { left: 80, top: 280, width: 520, height: 36, right: 600, bottom: 316 };
+    const card = {
+      innerText: 'appareldiary.com\nRMG Cutting Process: A Stage-by-Stage Control Guide',
+      parentElement: null
+    };
+    const anchor = {
+      href: targetUrl,
+      innerText: 'RMG Cutting Process: A Stage-by-Stage Control Guide',
+      target: '',
+      getAttribute: (name: string) => (name === 'href' ? targetUrl : null),
+      getBoundingClientRect: () => rect,
+      querySelector: () => ({ innerText: 'RMG Cutting Process: A Stage-by-Stage Control Guide' }),
+      closest: () => card,
+      parentElement: null,
+      scrollIntoView: vi.fn(),
+      focus: vi.fn(),
+      click
+    };
+    const root = { querySelectorAll: (selector: string) => (selector === 'a[href]' ? [anchor] : []) };
+    const document = {
+      body: { innerText: 'Google Search results' },
+      documentElement: {},
+      querySelector: (selector: string) => (selector === '#search' ? root : null)
+    };
+    const location = {
+      href: 'https://www.google.com/search?q=rmg+cutting',
+      assign: vi.fn((url: string) => { location.href = url; })
+    };
+    class MutationObserverStub {
+      observe() {}
+      disconnect() {}
+    }
+
+    const state = vm.runInNewContext(buildGoogleAutoClickInstallerScript('appareldiary'), {
+      window: { location, innerHeight: 800, innerWidth: 1200 },
+      location,
+      document,
+      URL,
+      MutationObserver: MutationObserverStub,
+      setInterval: () => 1,
+      clearInterval: () => undefined,
+      setTimeout: (cb: () => void) => { cb(); return 1; }
+    }) as { status: string; url?: string };
+
+    expect(state.status).toBe('clicked');
+    expect(click).toHaveBeenCalledTimes(1);
+    expect(location.assign).toHaveBeenCalledWith(targetUrl);
+    expect(location.href).toBe(targetUrl);
+  });
   it('arms and executes Keep Alive from the individual browser control', async () => {
     const executeJavaScript = vi.fn().mockResolvedValue({ links: [] });
     const webContents = {
@@ -167,7 +219,7 @@ describe('browser automation regressions', () => {
     internals.browsers.set(1, managed);
 
     const result = await Promise.race([
-      manager.broadcastSearch(1, 'safety stock', 'appareldiary.com', 1),
+      manager.broadcastSearch(1, 'safety stock', 'appareldiary', 1),
       new Promise<never>((_resolve, reject) =>
         setTimeout(() => reject(new Error('SEO scanner waited for full page load')), 500)
       )
