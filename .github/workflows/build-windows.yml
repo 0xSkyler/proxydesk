@@ -2,11 +2,14 @@ name: Build Windows Installer
 
 on:
   push:
-    branches: [main]
+    branches: [main, feature/seo-tracker-lite-0.4.1-verify]
     tags: ['v*']
   pull_request:
     branches: [main]
   workflow_dispatch: {}
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -59,6 +62,22 @@ jobs:
           name: MultiBrowserProxySetup-windows
           path: release/MultiBrowserProxySetup.exe
           if-no-files-found: error
+
+      - name: Record verification run
+        if: github.ref_name == 'feature/seo-tracker-lite-0.4.1-verify'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path .ci | Out-Null
+          @"
+          RUN_ID=${{ github.run_id }}
+          SOURCE_SHA=${{ github.sha }}
+          ARTIFACT_NAME=MultiBrowserProxySetup-windows
+          "@ | Set-Content -Path .ci/latest-run.txt -Encoding utf8
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .ci/latest-run.txt
+          git commit -m "Record verified Windows build ${{ github.run_id }}"
+          git push origin HEAD:feature/seo-tracker-lite-0.4.1-verify
 
       - name: Create GitHub Release
         if: startsWith(github.ref, 'refs/tags/v')
