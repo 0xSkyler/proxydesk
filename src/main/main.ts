@@ -2,8 +2,6 @@ import { app, BrowserWindow, session } from 'electron';
 import path from 'node:path';
 import { BrowserManager } from './BrowserManager';
 import { ProxyManager } from './ProxyManager';
-import { SettingsManager } from './SettingsManager';
-import { StorageManager } from './StorageManager';
 import { SeoAutomationManager } from './SeoAutomationManager';
 import { registerIpc } from './ipc/registerIpc';
 import { logger } from './Logger';
@@ -15,8 +13,6 @@ const isDev = process.env.NODE_ENV === 'development' || !app.isPackaged;
 let mainWindow: BrowserWindow | null = null;
 let browserManager: BrowserManager;
 let proxyManager: ProxyManager;
-let settingsManager: SettingsManager;
-let storageManager: StorageManager;
 let automationManager: SeoAutomationManager;
 let activeBrowserCount = 10;
 
@@ -73,17 +69,11 @@ async function ensureBrowserCount(count: number): Promise<number[]> {
 }
 
 async function bootstrap(): Promise<void> {
-  storageManager = new StorageManager();
-  await storageManager.init();
-
-  settingsManager = new SettingsManager(storageManager);
-  await settingsManager.init();
-
-  proxyManager = new ProxyManager(storageManager, settingsManager);
+  proxyManager = new ProxyManager();
   await proxyManager.init();
 
   browserManager = new BrowserManager();
-  activeBrowserCount = normalizeBrowserCount(settingsManager.get().browser.browserCount);
+  activeBrowserCount = 10;
 
   await createWindow();
 
@@ -100,14 +90,8 @@ async function bootstrap(): Promise<void> {
 
   await ensureBrowserCount(activeBrowserCount);
 
-  // Keep Alive is automatic after a matched Google result. Retain the
-  // enhanced scroll/link behavior but remove the unrelated settings UI.
-  const browserSettings = settingsManager.get().browser;
-  browserManager.configureKeepAlive(
-    browserSettings.keepAliveIntervalSec * 1000,
-    browserSettings.keepAliveMaxHops,
-    true
-  );
+  // Keep Alive is automatic after a matched Google result.
+  browserManager.configureKeepAlive(60_000, 25, true);
 
   logger.info('application', 'ProxyDesk SEO Tracker Lite ready.');
 }
