@@ -1,4 +1,4 @@
-import { app, BrowserWindow, session, shell } from 'electron';
+import { app, BrowserWindow, session } from 'electron';
 import path from 'node:path';
 import { BrowserManager } from './BrowserManager';
 import { ProxyManager } from './ProxyManager';
@@ -8,6 +8,7 @@ import { SeoAutomationManager } from './SeoAutomationManager';
 import { registerIpc } from './ipc/registerIpc';
 import { logger } from './Logger';
 import { BROWSER_IDS } from '../shared/types/browser';
+import { normalizeBrowserCount } from '../shared/types/automation';
 
 const isDev = process.env.NODE_ENV === 'development' || !app.isPackaged;
 
@@ -17,26 +18,16 @@ let proxyManager: ProxyManager;
 let settingsManager: SettingsManager;
 let storageManager: StorageManager;
 let automationManager: SeoAutomationManager;
-let rotationTimer: NodeJS.Timeout | null = null;
-
-// TOOLBAR_HEIGHT/SIDEBAR values mirror the renderer's CSS layout constants
-// (see src/renderer/styles/layout.css) so BrowserView bounds line up
-// pixel-for-pixel with the placeholder area each BrowserPanel renders.
-const GLOBAL_TOOLBAR_HEIGHT = 0; // renderer reports absolute bounds directly; kept for documentation.
-void GLOBAL_TOOLBAR_HEIGHT;
+let activeBrowserCount = 10;
 
 async function createWindow(): Promise<void> {
-  // createWindow() is only ever called after bootstrap() has initialized
-  // settingsManager (once directly, once more from app.on('activate', ...)
-  // which only fires post-bootstrap on macOS reactivation).
-  const { windowWidth, windowHeight } = settingsManager.get().application;
   mainWindow = new BrowserWindow({
-    width: windowWidth,
-    height: windowHeight,
-    minWidth: 1024,
+    width: 1600,
+    height: 1000,
+    minWidth: 1050,
     minHeight: 720,
     backgroundColor: '#0f1115',
-    title: 'ProxyDesk',
+    title: 'ProxyDesk SEO Tracker Lite',
     webPreferences: {
       preload: path.join(__dirname, '../preload/preload.js'),
       contextIsolation: true,
@@ -48,17 +39,8 @@ async function createWindow(): Promise<void> {
 
   browserManager.attachWindow(mainWindow);
 
-  // Never let the shell window (or any embedded BrowserView) navigate to
-  // arbitrary external protocol handlers or spawn new native windows —
-  // links that want a new window open in the OS default browser instead.
-  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    void shell.openExternal(url);
-    return { action: 'deny' };
-  });
-
   if (isDev) {
     await mainWindow.loadURL('http://localhost:5173');
-    mainWindow.webContents.openDevTools({ mode: 'detach' });
   } else {
     await mainWindow.loadFile(path.join(__dirname, '../renderer/index.html'));
   }
@@ -66,6 +48,28 @@ async function createWindow(): Promise<void> {
   mainWindow.on('closed', () => {
     mainWindow = null;
   });
+}
+
+async function ensureBrowserCount(count: number): Promise<number[]> {
+  const normalized = normalizeBrowserCount(count);
+  const desired = new Set(BROWSER_IDS.slice(0, normalized));
+  const existing = new Set(browserManager.getAll().map((browser) => browser.id));
+
+  for (const id of Array.from(existing)) {
+    if (!desired.has(id)) await browserManager.destroyBrowser(id);
+  }
+
+  for (const id of Array.from(desired)) {
+    if (existing.has(id)) continue;
+    await browserManager.createBrowser(id, {
+      persistSessions: false,
+      startPage: 'https://www.google.com/',
+      userAgent: ''
+    });
+  }
+
+  activeBrowserCount = normalized;
+  return BROWSER_IDS.slice(0, activeBrowserCount);
 }
 
 async function bootstrap(): Promise<void> {
@@ -79,207 +83,36 @@ async function bootstrap(): Promise<void> {
   await proxyManager.init();
 
   browserManager = new BrowserManager();
-  automationManager = new SeoAutomationManager(
-    proxyManager,
-    browserManager,
-    settingsManager,
-    () => BROWSER_IDS.slice(0, settingsManager.get().browser.browserCount)
-  );
-  // Remove browser cookies/cache/site storage left by any older persistent
-  // build for every possible workspace id before this run starts.
-  await browserManager.purgeLegacyPersistentSessions(BROWSER_IDS);
+  activeBrowserCount = normalizeBrowserCount(settingsManager.get().browser.browserCount);
 
   await createWindow();
 
+  automationManager = new SeoAutomationManager(
+    proxyManager,
+    browserManager,
+    ensureBrowserCount
+  );
+
   registerIpc({
     browserManager,
-    proxyManager,
-    settingsManager,
-    automationManager,
-    getBrowserIds: () => BROWSER_IDS.slice(0, settingsManager.get().browser.browserCount)
+    automationManager
   });
 
-  const settings = settingsManager.get();
-  const browserIds = BROWSER_IDS.slice(0, settings.browser.browserCount);
+  await ensureBrowserCount(activeBrowserCount);
 
-  for (const id of browserIds) {
-    await browserManager.createBrowser(id, {
-      persistSessions: settings.browser.persistSessions,
-      startPage: settings.browser.startPage,
-      userAgent: settings.browser.userAgent,
-      onGoogleBlocked: (browserId, continueUrl) => void handleGoogleBlocked(browserId, continueUrl)
-    });
-    if (settings.browser.keepAliveEnabled) browserManager.setBrowserKeepAlive(id, true, true);
-  }
-
-  if (settings.proxy.autoLoadOnStartup) {
-    try {
-      const summary = await proxyManager.reload(browserIds, settings.proxy.preferredCountryCode);
-      for (const assignment of summary.assignments) {
-        await browserManager.assignProxy(assignment.browserId, assignment.proxy);
-      }
-      logger.info(
-        'application',
-        `Startup proxy assignment complete: ${summary.working}/${summary.found} working, ` +
-          `${summary.assignments.filter((a) => a.proxy).length}/${browserIds.length} browsers assigned.`
-      );
-    } catch (err) {
-      logger.warn('application', `Startup proxy load failed: ${(err as Error).message}. Continuing without proxies.`);
-    }
-  }
-
+  // Keep Alive is automatic after a matched Google result. Retain the
+  // enhanced scroll/link behavior but remove the unrelated settings UI.
+  const browserSettings = settingsManager.get().browser;
   browserManager.configureKeepAlive(
-    settings.browser.keepAliveIntervalSec * 1000,
-    settings.browser.keepAliveMaxHops,
-    settings.browser.keepAliveFollowLinks
+    browserSettings.keepAliveIntervalSec * 1000,
+    browserSettings.keepAliveMaxHops,
+    true
   );
-  if (settings.browser.keepAliveEnabled) browserManager.setKeepAliveAll(true, true);
-  let globalKeepAliveEnabled = settings.browser.keepAliveEnabled;
-  scheduleProxyRotation();
 
-  settingsManager.onChange((updated) => {
-    browserManager.configureKeepAlive(
-      updated.browser.keepAliveIntervalSec * 1000,
-      updated.browser.keepAliveMaxHops,
-      updated.browser.keepAliveFollowLinks
-    );
-    if (updated.browser.keepAliveEnabled !== globalKeepAliveEnabled) {
-      globalKeepAliveEnabled = updated.browser.keepAliveEnabled;
-      browserManager.setKeepAliveAll(globalKeepAliveEnabled, globalKeepAliveEnabled);
-    }
-    scheduleProxyRotation();
-    void syncBrowserCount(updated);
-  });
-
-  logger.info('application', 'ProxyDesk ready.');
-}
-
-/**
- * Re-arms second-based proxy rotation from the existing proxy pool.
- */
-function scheduleProxyRotation(): void {
-  if (rotationTimer) {
-    clearInterval(rotationTimer);
-    rotationTimer = null;
-  }
-
-  const proxySettings = settingsManager.get().proxy;
-  if (!proxySettings.autoRotationEnabled || automationManager?.isRunning()) return;
-
-  const seconds = Math.max(5, Math.min(86400, Math.floor(proxySettings.rotationIntervalSec || 60)));
-  rotationTimer = setInterval(() => void runProxyRotation(), seconds * 1000);
-  logger.info('application', `Automatic proxy rotation armed: every ${seconds} second(s).`);
-}
-
-async function runProxyRotation(): Promise<void> {
-  if (automationManager?.isRunning()) return;
-  const settings = settingsManager.get();
-  const browserIds = BROWSER_IDS.slice(0, settings.browser.browserCount);
-  try {
-    const summary = await proxyManager.rotate(browserIds, settings.proxy.preferredCountryCode);
-    for (const assignment of summary.assignments) {
-      await browserManager.assignProxy(assignment.browserId, assignment.proxy);
-    }
-    logger.info(
-      'proxy',
-      `Automatic proxy rotation complete: ${summary.assignments.filter((a) => a.proxy).length}/${browserIds.length} browsers reassigned.`
-    );
-  } catch (err) {
-    logger.warn('proxy', `Automatic proxy rotation failed: ${(err as Error).message}. Will retry on the next cycle.`);
-  }
-}
-
-/**
- * Browsers are only ever created up front at bootstrap for whatever
- * `browserCount` was at the time — nothing previously reacted when the
- * setting changed later in Settings, so raising it past the number of
- * browsers actually running just added empty grid tiles with no real
- * BrowserView behind them (rendered as solid black, since there was never
- * any Chromium content to show). This brings the live set of managed
- * browsers in line with the current `browserCount` setting: creating
- * whatever new ids are now in range, and tearing down any that fell out of
- * range when the count was lowered.
- */
-async function syncBrowserCount(settings: ReturnType<SettingsManager['get']>): Promise<void> {
-  const desiredIds = new Set(BROWSER_IDS.slice(0, settings.browser.browserCount));
-  const existingIds = new Set(browserManager.getAll().map((b) => b.id));
-
-  const toCreate = Array.from(desiredIds).filter((id) => !existingIds.has(id));
-  const toDestroy = Array.from(existingIds).filter((id) => !desiredIds.has(id));
-
-  for (const id of toCreate) {
-    await browserManager.createBrowser(id, {
-      persistSessions: settings.browser.persistSessions,
-      startPage: settings.browser.startPage,
-      userAgent: settings.browser.userAgent,
-      onGoogleBlocked: (browserId, continueUrl) => void handleGoogleBlocked(browserId, continueUrl)
-    });
-  }
-  for (const id of toDestroy) {
-    await browserManager.destroyBrowser(id);
-  }
-
-  if (toCreate.length > 0) {
-    logger.info('application', `Browser count increased — created ${toCreate.length} new browser(s).`);
-  }
-  if (toDestroy.length > 0) {
-    logger.info('application', `Browser count decreased — closed ${toDestroy.length} browser(s).`);
-  }
-}
-
-/**
- * Fires when a browser lands on Google's CAPTCHA interstitial while
- * browsing normally (see BrowserManager.onGoogleBlocked) — the same
- * signal the deliberate "Check Google Trust" feature looks for, just
- * discovered live. Marks the proxy that just got flagged, swaps in a
- * different one, and retries the page the browser was actually trying to
- * reach (not the interstitial itself). Only reacts when "Auto-replace
- * failed proxies" is on (Settings > Proxy) — BrowserManager already caps
- * how many times this fires in a row per browser (see
- * MAX_GOOGLE_BLOCK_RETRIES), so this itself doesn't need its own limit.
- */
-async function handleGoogleBlocked(browserId: number, continueUrl: string): Promise<void> {
-  const settings = settingsManager.get();
-
-  try {
-    await proxyManager.markGoogleBlocked(browserId);
-
-    // During autonomous SEO mode, a Google challenge ends that browser's
-    // current SEO attempt. We do not immediately swap proxies in response
-    // to the challenge; the normal user-configured rotation cycle will
-    // choose the next validated proxy on schedule.
-    if (automationManager?.isRunning()) {
-      browserManager.setBrowserKeepAlive(browserId, false, false);
-      logger.warn(
-        'proxy',
-        `Browser ${browserId}: Google challenge observed during autonomous SEO. Waiting for the next scheduled rotation cycle.`
-      );
-      void continueUrl;
-      return;
-    }
-
-    if (!settings.proxy.autoReplaceFailed) return;
-
-    const newProxy = await proxyManager.replaceFailed(browserId);
-    if (!newProxy) {
-      logger.warn('proxy', `Browser ${browserId}: no alternative proxy available after a Google CAPTCHA block.`);
-      return;
-    }
-    await browserManager.assignProxy(browserId, newProxy);
-    await browserManager.navigate(browserId, continueUrl);
-    logger.info(
-      'proxy',
-      `Browser ${browserId}: swapped to ${newProxy.host}:${newProxy.port} after a Google CAPTCHA block and retried.`
-    );
-  } catch (err) {
-    logger.warn('proxy', `Browser ${browserId}: failed to handle a Google CAPTCHA block: ${(err as Error).message}`);
-  }
+  logger.info('application', 'ProxyDesk SEO Tracker Lite ready.');
 }
 
 app.whenReady().then(() => {
-  // Electron security default: block permission requests (camera, mic,
-  // geolocation, notifications) from any embedded proxied content unless a
-  // future feature explicitly needs one.
   session.defaultSession.setPermissionRequestHandler((_wc, _permission, callback) => callback(false));
 
   void bootstrap().catch((err) => {
@@ -296,7 +129,6 @@ app.on('window-all-closed', () => {
 });
 
 app.on('before-quit', () => {
-  if (rotationTimer) clearInterval(rotationTimer);
   automationManager?.stop();
   void browserManager?.destroyAll();
 });
