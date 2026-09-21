@@ -47,8 +47,6 @@ describe('browser automation regressions', () => {
     internals.browsers.set(1, managed);
 
     manager.setBrowserKeepAlive(1, true, true);
-    managed.keepAliveNextAt = 0;
-    internals.tickKeepAlive();
 
     await vi.waitFor(() => expect(executeJavaScript).toHaveBeenCalledTimes(1));
     expect(managed.keepAliveEnabled).toBe(false);
