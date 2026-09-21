@@ -59,6 +59,9 @@ describe('SeoAutomationManager', () => {
       cancelCurrentValidation() {
         events.push('cancel-validation');
       },
+      resetAutomationRotationHistory() {
+        events.push('reset-rotation-history');
+      },
       async validateFileStreaming(
         _filePath: string,
         browserIds: number[],
@@ -139,6 +142,7 @@ describe('SeoAutomationManager', () => {
     });
     await waitForCycle(manager);
 
+    expect(events).toContain('reset-rotation-history');
     expect(events.indexOf('assign-1')).toBeGreaterThan(-1);
     expect(events.indexOf('search-1')).toBeGreaterThan(events.indexOf('assign-1'));
     expect(events.indexOf('search-1')).toBeLessThan(events.indexOf('validation-finished'));
