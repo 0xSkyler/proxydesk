@@ -789,7 +789,7 @@ export class BrowserManager extends EventEmitter {
   }
 }
 
-function buildKeepAliveActionScript(allowHop: boolean): string {
+export function buildKeepAliveActionScript(allowHop: boolean): string {
   return `(async () => {
     const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
     const root = document.scrollingElement || document.documentElement || document.body;
@@ -906,7 +906,7 @@ interface GoogleResultScan {
   };
 }
 
-function buildGoogleResultScanScript(targetHost: string): string {
+export function buildGoogleResultScanScript(targetHost: string): string {
   return `(function() {
     try {
       var target = ${JSON.stringify(targetHost.toLowerCase())};
@@ -1006,7 +1006,7 @@ function buildGoogleResultScanScript(targetHost: string): string {
   })()`;
 }
 
-function buildClickGoogleTargetResultScript(targetHost: string): string {
+export function buildClickGoogleTargetResultScript(targetHost: string): string {
   return `(function() {
     try {
       var target = ${JSON.stringify(targetHost.toLowerCase())};
