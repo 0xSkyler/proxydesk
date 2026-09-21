@@ -260,7 +260,8 @@ export class SeoBrowserManager extends EventEmitter {
     managed.generation += 1;
     managed.view.webContents.stop();
     this.window?.removeBrowserView(managed.view);
-    managed.view.webContents.destroy();
+    // Removing the BrowserView releases it from the window. Electron 31's
+    // WebContents type does not expose a public destroy() method here.
     this.browsers.delete(id);
   }
 
