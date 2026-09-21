@@ -520,8 +520,31 @@ export class BrowserManager extends EventEmitter {
       // IMPORTANT: do not await loadURL here. Electron resolves loadURL only
       // after navigation finishes, but Google results can already be visible
       // and clickable long before images/scripts/other resources finish.
-      // Start navigation and scan the newly committed Google DOM in parallel.
+      //
+      // Electron also queues executeJavaScript while a navigation is still
+      // loading. With slow proxies that left ProxyDesk stuck even though the
+      // organic result was visibly painted. Watch DOM readiness instead and
+      // deliberately stop the remaining Google resource load after a very
+      // short paint grace. That releases executeJavaScript immediately.
       let navigationErrorMessage: string | null = null;
+      let googleDomReady = false;
+      let googleLoadStopped = false;
+      let stopGoogleTimer: NodeJS.Timeout | null = null;
+
+      const onGoogleDomReady = () => {
+        if (!isGoogleSearchResultsUrl(wc.getURL())) return;
+        googleDomReady = true;
+        if (stopGoogleTimer) clearTimeout(stopGoogleTimer);
+        stopGoogleTimer = setTimeout(() => {
+          stopGoogleTimer = null;
+          if (!isGoogleSearchResultsUrl(wc.getURL())) return;
+          if (wc.isLoading()) wc.stop();
+          googleLoadStopped = true;
+        }, 180);
+      };
+
+      wc.on('dom-ready', onGoogleDomReady);
+
       void wc.loadURL(searchUrl).catch((err) => {
         const message = (err as Error).message || String(err);
         // Clicking a result while Google is still loading intentionally
@@ -556,6 +579,8 @@ export class BrowserManager extends EventEmitter {
           // result, recognize success immediately even if its JS context
           // disappeared before it could report the click back to Electron.
           if (hostMatchesTarget(currentUrl, targetHost)) {
+            wc.removeListener('dom-ready', onGoogleDomReady);
+            if (stopGoogleTimer) clearTimeout(stopGoogleTimer);
             this.setBrowserKeepAlive(id, true, true);
             return {
               browserId: id,
@@ -583,6 +608,22 @@ export class BrowserManager extends EventEmitter {
         }
 
         googleCommitted = true;
+
+        // Never let a slow Google subresource keep the SEO scanner blocked.
+        // Normally dom-ready schedules the stop above. If the event is lost
+        // for any reason, stop after a brief committed-page grace rather than
+        // paginating away from an already-visible result.
+        if (!googleDomReady && !googleLoadStopped) {
+          await delay(80);
+          if (isGoogleSearchResultsUrl(wc.getURL()) && wc.isLoading()) {
+            wc.stop();
+            googleLoadStopped = true;
+          }
+          await delay(20);
+        } else if (!googleLoadStopped && wc.isLoading()) {
+          await delay(30);
+          continue;
+        }
 
         // Install one watcher inside the Google page itself. It scans the
         // current DOM immediately, then observes mutations and also retries
@@ -694,6 +735,12 @@ export class BrowserManager extends EventEmitter {
           error: `Failed to load Google results page ${pageIndex + 1}: ${navigationErrorMessage}`,
           ranAt
         };
+      }
+
+      wc.removeListener('dom-ready', onGoogleDomReady);
+      if (stopGoogleTimer) {
+        clearTimeout(stopGoogleTimer);
+        stopGoogleTimer = null;
       }
 
       totalScanned += pageMaxScanned;
