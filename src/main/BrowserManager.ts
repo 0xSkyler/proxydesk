@@ -183,6 +183,10 @@ export class BrowserManager extends EventEmitter {
 
     const partition = this.partitionFor(id, options.persistSessions);
     const ses = session.fromPartition(partition, { cache: true });
+    // This partition has no "persist:" prefix, so it exists only in memory.
+    // Clear defensively as well: every process launch and every browser id
+    // begins with empty cookies/storage/cache.
+    await Promise.allSettled([ses.clearStorageData(), ses.clearCache()]);
     if (options.userAgent) ses.setUserAgent(options.userAgent);
 
     const view = new BrowserView({
@@ -1269,7 +1273,8 @@ export function buildClickGoogleTargetResultScript(targetHost: string): string {
 
 function normalizeUrl(input: string): string {
   const trimmed = input.trim();
-  if (/^[a-zA-Z][a-zA-Z\d+\-.]*:\/\//.test(trimmed)) return trimmed;
+  // Accept non-network schemes used internally, especially about:blank.
+  if (/^[a-zA-Z][a-zA-Z\d+\-.]*:/.test(trimmed)) return trimmed;
   if (/^localhost(:\d+)?/.test(trimmed) || /^\d{1,3}(\.\d{1,3}){3}/.test(trimmed)) {
     return `http://${trimmed}`;
   }
