@@ -1,49 +1,33 @@
 import { useEffect } from 'react';
 import { useAppStore } from '../stores/appStore';
 
-/**
- * Bootstraps the renderer's store from the main process and subscribes to
- * push events (browser state changes, proxy assignment changes) so the UI
- * stays live without polling.
- */
 export function useAppData(): void {
-  const setBrowsers = useAppStore((s) => s.setBrowsers);
-  const upsertBrowser = useAppStore((s) => s.upsertBrowser);
-  const setProxies = useAppStore((s) => s.setProxies);
-  const setSettings = useAppStore((s) => s.setSettings);
-  const setReloadSummary = useAppStore((s) => s.setReloadSummary);
-  const setReloadProgress = useAppStore((s) => s.setReloadProgress);
+  const setBrowsers = useAppStore((state) => state.setBrowsers);
+  const upsertBrowser = useAppStore((state) => state.upsertBrowser);
+  const setAutomation = useAppStore((state) => state.setAutomation);
+  const setResult = useAppStore((state) => state.setResult);
 
   useEffect(() => {
     let cancelled = false;
 
-    async function load() {
-      const [browsers, proxies, settings] = await Promise.all([
-        window.app.browser.getAll(),
-        window.app.proxy.getAll(),
-        window.app.settings.get()
-      ]);
+    void Promise.all([
+      window.app.browser.getAll(),
+      window.app.automation.getState()
+    ]).then(([browsers, automation]) => {
       if (cancelled) return;
       setBrowsers(browsers);
-      setProxies(proxies);
-      setSettings(settings);
-    }
-
-    void load();
-
-    const offBrowser = window.app.browser.onStateChanged((state) => upsertBrowser(state));
-    const offProxy = window.app.proxy.onAssignmentsChanged((summary) => {
-      setReloadSummary(summary);
-      setReloadProgress(null);
-      void window.app.proxy.getAll().then(setProxies);
+      setAutomation(automation);
     });
-    const offProgress = window.app.proxy.onReloadProgress((progress) => setReloadProgress(progress));
+
+    const offBrowser = window.app.browser.onStateChanged(upsertBrowser);
+    const offAutomation = window.app.automation.onStateChanged(setAutomation);
+    const offResult = window.app.automation.onSeoResult(({ result }) => setResult(result));
 
     return () => {
       cancelled = true;
       offBrowser();
-      offProxy();
-      offProgress();
+      offAutomation();
+      offResult();
     };
-  }, [setBrowsers, upsertBrowser, setProxies, setSettings, setReloadSummary, setReloadProgress]);
+  }, [setBrowsers, upsertBrowser, setAutomation, setResult]);
 }
