@@ -1,7 +1,7 @@
 {
   "name": "proxydesk",
   "productName": "ProxyDesk",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "ProxyDesk SEO with autonomous proxy-file validation, immediate live assignment, SEO tracking and enhanced Keep Alive.",
   "author": "ProxyDesk",
   "license": "MIT",
