@@ -606,9 +606,28 @@ export class BrowserManager extends EventEmitter {
       totalScanned += pageMaxScanned;
       if (!latestScan.match) continue;
 
-      const clicked = (await wc
-        .executeJavaScript(buildClickGoogleTargetResultScript(targetHost), true)
-        .catch(() => false)) as boolean;
+      let clicked = false;
+      const point = latestScan.match.clickPoint;
+      if (point && Number.isFinite(point.x) && Number.isFinite(point.y)) {
+        // Send a native Chromium mouse gesture directly to the BrowserView.
+        // This does not depend on Google's JS click handlers accepting a
+        // synthetic HTMLElement.click() and works with separately-rendered
+        // domain/title markup like the current desktop SERP.
+        const x = Math.max(1, Math.round(point.x));
+        const y = Math.max(1, Math.round(point.y));
+        wc.sendInputEvent({ type: 'mouseMove', x, y });
+        wc.sendInputEvent({ type: 'mouseDown', x, y, button: 'left', clickCount: 1 });
+        wc.sendInputEvent({ type: 'mouseUp', x, y, button: 'left', clickCount: 1 });
+        clicked = true;
+      }
+
+      // DOM click is retained only as a fallback for unusual layouts where
+      // the target is detectable but Chromium does not expose a usable rect.
+      if (!clicked) {
+        clicked = (await wc
+          .executeJavaScript(buildClickGoogleTargetResultScript(targetHost), true)
+          .catch(() => false)) as boolean;
+      }
 
       if (!clicked) {
         return {
@@ -957,6 +976,7 @@ interface GoogleResultScan {
     url: string;
     title: string;
     organicIndex: number;
+    clickPoint?: { x: number; y: number };
   };
 }
 
@@ -1002,51 +1022,122 @@ export function buildGoogleResultScanScript(targetHost: string): string {
 
       var displayMentionsTarget = ${resultTextMentionsHost.toString()};
       var searchRoot = document.querySelector('#search') || document.querySelector('#rso') || document.querySelector('main') || document.body;
-      var anchors = [];
-      Array.prototype.slice.call(searchRoot ? searchRoot.querySelectorAll('a[href]') : []).forEach(function (anchor) {
-        if (anchors.indexOf(anchor) !== -1) return;
-        var rawHref = anchor.getAttribute('href') || anchor.href || '';
-        var destination = unwrap(rawHref);
-        var container = anchor.closest('.MjjYud, .g, [data-snhf]') ||
-          (anchor.parentElement && anchor.parentElement.parentElement && anchor.parentElement.parentElement.parentElement) ||
-          anchor.parentElement || anchor;
-        var nearbyText = ((container && container.innerText) || anchor.innerText || '').slice(0, 1200);
-        var displayText = nearbyText.toLowerCase().replace(/www\\./g, '');
-        var hasResultHeading = Boolean(anchor.querySelector('h3'));
-        var hasTargetSignal = destinationMatches(destination) || displayMentionsTarget(displayText, target);
-        if (hasResultHeading || hasTargetSignal) anchors.push(anchor);
-      });
 
+      function visibleRect(node) {
+        if (!node || !node.getBoundingClientRect) return null;
+        var rect = node.getBoundingClientRect();
+        if (rect.width <= 2 || rect.height <= 2) return null;
+        if (rect.bottom < 0 || rect.right < 0 || rect.top > window.innerHeight || rect.left > window.innerWidth) return null;
+        return rect;
+      }
+
+      function resultContainerFor(node) {
+        if (!node) return null;
+        var direct = node.closest && node.closest('.MjjYud, .g, [data-snhf], [data-hveid]');
+        if (direct) return direct;
+        var current = node;
+        for (var depth = 0; current && depth < 7; depth += 1, current = current.parentElement) {
+          var text = ((current && current.innerText) || '').slice(0, 1800);
+          if (displayMentionsTarget(text, target) && current.querySelector && current.querySelector('a[href]')) return current;
+        }
+        return node.parentElement || node;
+      }
+
+      function bestAnchor(container, seedAnchor) {
+        var candidates = [];
+        if (seedAnchor) candidates.push(seedAnchor);
+        if (container && container.querySelectorAll) {
+          Array.prototype.slice.call(container.querySelectorAll('a[href]')).forEach(function (a) {
+            if (candidates.indexOf(a) === -1) candidates.push(a);
+          });
+        }
+        var firstVisible = null;
+        for (var j = 0; j < candidates.length; j += 1) {
+          var a = candidates[j];
+          var rect = visibleRect(a);
+          if (!rect) continue;
+          if (!firstVisible) firstVisible = a;
+          var destination = unwrap(a.getAttribute('href') || a.href || '');
+          if (destinationMatches(destination)) return a;
+          if (a.querySelector('h3')) return a;
+          var text = (a.innerText || a.getAttribute('aria-label') || '').trim();
+          if (text.length > 8 && !displayMentionsTarget(text, target)) return a;
+        }
+        return firstVisible;
+      }
+
+      var anchors = Array.prototype.slice.call(searchRoot ? searchRoot.querySelectorAll('a[href]') : []);
       var resultsScanned = 0;
       for (var i = 0; i < anchors.length; i += 1) {
-        var anchor = anchors[i];
-        var titleNode = anchor.querySelector('h3');
+        var seed = anchors[i];
+        var destination = unwrap(seed.getAttribute('href') || seed.href || '');
+        var container = resultContainerFor(seed);
+        var nearbyText = ((container && container.innerText) || seed.innerText || '').slice(0, 1800);
+        if (/\\bSponsored\\b/i.test(nearbyText.slice(0, 220))) continue;
+
+        var matched = destinationMatches(destination) || displayMentionsTarget(nearbyText, target);
+        if (!matched) continue;
+
+        var anchor = bestAnchor(container, seed);
+        if (!anchor) continue;
+        var anchorDestination = unwrap(anchor.getAttribute('href') || anchor.href || destination);
+        var titleNode = anchor.querySelector && anchor.querySelector('h3');
         var titleText = ((titleNode && titleNode.innerText) || anchor.getAttribute('aria-label') || anchor.innerText || '').trim();
-
-        var container = anchor.closest('.MjjYud, .g, [data-snhf]') ||
-          (anchor.parentElement && anchor.parentElement.parentElement && anchor.parentElement.parentElement.parentElement) ||
-          anchor.parentElement || anchor;
-        var nearbyText = ((container && container.innerText) || anchor.innerText || '').slice(0, 1200);
-        if (/\\bSponsored\\b/i.test(nearbyText.slice(0, 180))) continue;
-
-        var rawHref = anchor.getAttribute('href') || anchor.href || '';
-        var destination = unwrap(rawHref);
-        var displayText = nearbyText.toLowerCase().replace(/www\\./g, '');
-        var matched = destinationMatches(destination) || displayMentionsTarget(displayText, target);
+        anchor.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'auto' });
+        var rect = visibleRect(anchor);
+        if (!rect) continue;
 
         resultsScanned += 1;
-        if (matched) {
-          return {
-            blocked: false,
-            ready: true,
-            resultsScanned: resultsScanned,
-            match: {
-              url: destination,
-              title: titleText,
-              organicIndex: resultsScanned - 1
+        return {
+          blocked: false,
+          ready: true,
+          resultsScanned: resultsScanned,
+          match: {
+            url: anchorDestination,
+            title: titleText,
+            organicIndex: resultsScanned - 1,
+            clickPoint: {
+              x: rect.left + Math.min(rect.width / 2, Math.max(12, rect.width - 12)),
+              y: rect.top + rect.height / 2
             }
-          };
-        }
+          }
+        };
+      }
+
+      // Fallback for Google's current layout where the visible domain line
+      // can be a sibling of the blue title rather than text inside its <a>.
+      var textNodes = Array.prototype.slice.call(searchRoot ? searchRoot.querySelectorAll('span, cite, div') : []);
+      for (var k = 0; k < textNodes.length; k += 1) {
+        var node = textNodes[k];
+        var nodeText = (node.innerText || '').trim();
+        if (!displayMentionsTarget(nodeText, target)) continue;
+        var card = resultContainerFor(node);
+        var cardText = ((card && card.innerText) || '').slice(0, 1800);
+        if (/\\bSponsored\\b/i.test(cardText.slice(0, 220))) continue;
+        var fallbackAnchor = bestAnchor(card, node.closest && node.closest('a[href]'));
+        if (!fallbackAnchor) continue;
+        var fallbackRect = visibleRect(fallbackAnchor);
+        if (!fallbackRect) continue;
+        var fallbackDestination = unwrap(fallbackAnchor.getAttribute('href') || fallbackAnchor.href || '');
+        var fallbackTitleNode = fallbackAnchor.querySelector && fallbackAnchor.querySelector('h3');
+        var fallbackTitle = ((fallbackTitleNode && fallbackTitleNode.innerText) || fallbackAnchor.getAttribute('aria-label') || fallbackAnchor.innerText || '').trim();
+        fallbackAnchor.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'auto' });
+        fallbackRect = visibleRect(fallbackAnchor) || fallbackRect;
+        resultsScanned += 1;
+        return {
+          blocked: false,
+          ready: true,
+          resultsScanned: resultsScanned,
+          match: {
+            url: fallbackDestination,
+            title: fallbackTitle,
+            organicIndex: resultsScanned - 1,
+            clickPoint: {
+              x: fallbackRect.left + Math.min(fallbackRect.width / 2, Math.max(12, fallbackRect.width - 12)),
+              y: fallbackRect.top + fallbackRect.height / 2
+            }
+          }
+        };
       }
 
       return {
