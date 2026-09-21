@@ -125,27 +125,109 @@ describe('browser automation regressions', () => {
 
     if (internals.keepAliveTimer) clearInterval(internals.keepAliveTimer);
   });
-  it('finds a visible target result even when Google does not wrap it in an h3', () => {
-    const targetUrl = 'https://appareldiary.com/article/safety-stock';
-    const container = { innerText: 'ApparelDiary.com › article › safety-stock\nOne Safety Stock Rule Does Not Fit a Trims Store' };
-    const anchor = {
+  it('uses a native WebContents mouse click when the target result exposes coordinates', async () => {
+    const targetUrl = 'https://appareldiary.com/article/rmg-cutting';
+    let currentUrl = 'https://www.google.com/search?q=rmg+cutting';
+    const sent: Array<{ type: string; x?: number; y?: number }> = [];
+
+    const webContents = {
+      loadURL: vi.fn().mockResolvedValue(undefined),
+      getURL: () => currentUrl,
+      isDestroyed: () => false,
+      isLoading: () => false,
+      executeJavaScript: vi.fn().mockResolvedValue({
+        blocked: false,
+        ready: true,
+        resultsScanned: 1,
+        match: {
+          url: targetUrl,
+          title: 'RMG Cutting Process: A Stage-by-Stage Control Guide',
+          organicIndex: 0,
+          clickPoint: { x: 260, y: 315 }
+        }
+      }),
+      sendInputEvent: vi.fn().mockImplementation((event: { type: string; x?: number; y?: number }) => {
+        sent.push(event);
+        if (event.type === 'mouseUp') currentUrl = targetUrl;
+      })
+    };
+
+    const managed = {
+      id: 11,
+      view: { webContents },
+      session: {},
+      state: { id: 11, keepAliveEnabled: false, keepAliveHops: 0, loading: true },
+      restartAttempts: 0,
+      googleBlockRetries: 0,
+      keepAliveEnabled: false,
+      keepAliveHops: 0,
+      keepAliveNextAt: 0,
+      keepAliveBusy: false,
+      keepAliveVisited: new Set<string>()
+    };
+
+    const manager = new BrowserManager();
+    const internals = manager as unknown as {
+      browsers: Map<number, unknown>;
+      keepAliveTimer: NodeJS.Timeout | null;
+    };
+    internals.browsers.set(11, managed);
+
+    const result = await manager.broadcastSearch(11, 'rmg cutting', 'appareldiary.com', 1);
+
+    expect(result.status).toBe('matched');
+    expect(sent.map((event) => event.type)).toEqual(['mouseMove', 'mouseDown', 'mouseUp']);
+    expect(webContents.sendInputEvent).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'mouseDown', x: 260, y: 315 })
+    );
+
+    if (internals.keepAliveTimer) clearInterval(internals.keepAliveTimer);
+  });
+  it('finds a screenshot-like result when the domain label is a sibling of the blue title link', () => {
+    const targetUrl = 'https://appareldiary.com/article/precision-and-profit-rmg-cutting';
+    const rect = { left: 65, top: 285, width: 520, height: 34, right: 585, bottom: 319 };
+    const titleAnchor = {
       href: targetUrl,
-      innerText: 'One Safety Stock Rule Does Not Fit a Trims Store',
+      innerText: 'RMG Cutting Process: A Stage-by-Stage Control Guide',
       getAttribute: (name: string) => (name === 'href' ? targetUrl : null),
       querySelector: () => null,
-      closest: () => container,
-      parentElement: null
+      closest: (selector: string) => (selector.includes('MjjYud') ? resultCard : null),
+      parentElement: null,
+      getBoundingClientRect: () => rect,
+      scrollIntoView: vi.fn()
     };
-    const searchRoot = { querySelectorAll: () => [anchor] };
+    const domainNode = {
+      innerText: 'appareldiary.com',
+      parentElement: null,
+      closest: (selector: string) => {
+        if (selector === 'a[href]') return null;
+        if (selector.includes('MjjYud')) return resultCard;
+        return null;
+      }
+    };
+    const resultCard = {
+      innerText: 'appareldiary.com\nhttps://appareldiary.com › article › precision-and-profit-a...\nRMG Cutting Process: A Stage-by-Stage Control Guide',
+      parentElement: null,
+      querySelector: (selector: string) => (selector === 'a[href]' ? titleAnchor : null),
+      querySelectorAll: (selector: string) => (selector === 'a[href]' ? [titleAnchor] : []),
+      closest: () => null
+    };
+    const searchRoot = {
+      querySelectorAll: (selector: string) => {
+        if (selector === 'a[href]') return [titleAnchor];
+        if (selector === 'span, cite, div') return [domainNode];
+        return [];
+      }
+    };
     const document = {
       body: { innerText: 'Google Search results' },
-      readyState: 'complete',
+      readyState: 'interactive',
       querySelector: (selector: string) => (selector === '#search' ? searchRoot : null)
     };
-    const location = { href: 'https://www.google.com/search?q=safety+stock' };
+    const location = { href: 'https://www.google.com/search?q=rmg+cutting' };
 
     const result = vm.runInNewContext(buildGoogleResultScanScript('appareldiary.com'), {
-      window: { location },
+      window: { location, innerHeight: 700, innerWidth: 1000 },
       location,
       document,
       URL
@@ -153,12 +235,18 @@ describe('browser automation regressions', () => {
       blocked: boolean;
       ready: boolean;
       resultsScanned: number;
-      match?: { url: string; title: string; organicIndex: number };
+      match?: {
+        url: string;
+        title: string;
+        organicIndex: number;
+        clickPoint?: { x: number; y: number };
+      };
     };
 
     expect(result.blocked).toBe(false);
     expect(result.ready).toBe(true);
-    expect(result.resultsScanned).toBe(1);
     expect(result.match?.url).toBe(targetUrl);
+    expect(result.match?.title).toContain('RMG Cutting Process');
+    expect(result.match?.clickPoint).toEqual({ x: 325, y: 302 });
   });
 });
