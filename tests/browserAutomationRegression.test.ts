@@ -55,6 +55,76 @@ describe('browser automation regressions', () => {
     if (internals.keepAliveTimer) clearInterval(internals.keepAliveTimer);
   });
 
+  it('detects and clicks a Google result before loadURL finishes', async () => {
+    const targetUrl = 'https://appareldiary.com/article/safety-stock';
+    let currentUrl = 'about:blank';
+
+    const loadURL = vi.fn().mockImplementation((url: string) => {
+      // Simulate Chromium committing/painting Google immediately while the
+      // navigation promise itself is still waiting on slow resources.
+      currentUrl = url;
+      return new Promise<void>(() => undefined);
+    });
+
+    const executeJavaScript = vi.fn().mockImplementation(async (script: string) => {
+      if (script.includes('resultsScanned')) {
+        return {
+          blocked: false,
+          ready: true,
+          resultsScanned: 1,
+          match: { url: targetUrl, title: 'Safety Stock Article', organicIndex: 0 }
+        };
+      }
+      if (script.includes('anchor.click()')) {
+        currentUrl = targetUrl;
+        return true;
+      }
+      return { links: [] };
+    });
+
+    const webContents = {
+      loadURL,
+      getURL: () => currentUrl,
+      isDestroyed: () => false,
+      isLoading: () => false,
+      executeJavaScript
+    };
+    const managed = {
+      id: 1,
+      view: { webContents },
+      session: {},
+      state: { id: 1, keepAliveEnabled: false, keepAliveHops: 0, loading: true },
+      restartAttempts: 0,
+      googleBlockRetries: 0,
+      keepAliveEnabled: false,
+      keepAliveHops: 0,
+      keepAliveNextAt: 0,
+      keepAliveBusy: false,
+      keepAliveVisited: new Set<string>()
+    };
+
+    const manager = new BrowserManager();
+    const internals = manager as unknown as {
+      browsers: Map<number, unknown>;
+      keepAliveTimer: NodeJS.Timeout | null;
+    };
+    internals.browsers.set(1, managed);
+
+    const result = await Promise.race([
+      manager.broadcastSearch(1, 'safety stock', 'appareldiary.com', 1),
+      new Promise<never>((_resolve, reject) =>
+        setTimeout(() => reject(new Error('SEO scanner waited for full page load')), 500)
+      )
+    ]);
+
+    expect(loadURL).toHaveBeenCalledTimes(1);
+    expect(result.status).toBe('matched');
+    expect(result.landedUrl).toBe(targetUrl);
+    expect(result.keepAliveStarted).toBe(true);
+    expect(executeJavaScript).toHaveBeenCalled();
+
+    if (internals.keepAliveTimer) clearInterval(internals.keepAliveTimer);
+  });
   it('finds a visible target result even when Google does not wrap it in an h3', () => {
     const targetUrl = 'https://appareldiary.com/article/safety-stock';
     const container = { innerText: 'ApparelDiary.com › article › safety-stock\nOne Safety Stock Rule Does Not Fit a Trims Store' };
