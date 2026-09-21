@@ -1,14 +1,8 @@
-import { promises as fs } from 'node:fs';
-import os from 'node:os';
-import path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import { SeoAutomationManager } from '../src/main/SeoAutomationManager';
 import type { ProxyRecord, ReloadProxiesSummary } from '../src/shared/types/proxy';
 import type { BrowserManager } from '../src/main/BrowserManager';
 import type { ProxyManager } from '../src/main/ProxyManager';
-import type { SettingsManager } from '../src/main/SettingsManager';
-
-const tempDirs: string[] = [];
 
 function makeProxy(id: string): ProxyRecord {
   return {
@@ -17,7 +11,7 @@ function makeProxy(id: string): ProxyRecord {
     port: 8080,
     protocol: 'http',
     countryVerified: false,
-    sources: ['test'],
+    sources: ['ProxyScrape Free API'],
     status: 'working',
     score: 100,
     successCount: 1,
@@ -30,7 +24,7 @@ async function waitForCycle(manager: SeoAutomationManager): Promise<void> {
   if (!manager.getState().cycleInProgress && manager.getState().cycleNumber > 0) return;
   await new Promise<void>((resolve) => {
     const listener = (state: ReturnType<SeoAutomationManager['getState']>) => {
-      if (!state.cycleInProgress && state.cycleNumber > 0 && state.lastCycleCompletedAt) {
+      if (!state.cycleInProgress && state.lastCycleCompletedAt) {
         manager.off('stateChanged', listener);
         resolve();
       }
@@ -39,49 +33,36 @@ async function waitForCycle(manager: SeoAutomationManager): Promise<void> {
   });
 }
 
-afterEach(async () => {
-  await Promise.all(tempDirs.splice(0).map((dir) => fs.rm(dir, { recursive: true, force: true })));
-});
-
-describe('SeoAutomationManager', () => {
-  it('starts SEO for a browser before the rest of proxy validation finishes and reuses the saved query', async () => {
-    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'proxydesk-auto-'));
-    tempDirs.push(dir);
-    const filePath = path.join(dir, 'proxy.txt');
-    await fs.writeFile(filePath, '127.0.0.1:8000\n127.0.0.1:8001\n', 'utf8');
-
+describe('SeoAutomationManager Lite workflow', () => {
+  it('starts SEO immediately when individual live proxies arrive and reuses the saved job on rotation', async () => {
     const events: string[] = [];
-    const searches: Array<{ id: number; query: string; target: string }> = [];
+    const searches: Array<{ id: number; query: string; target: string; maxPages: number }> = [];
     const p1 = makeProxy('p1');
     const p2 = makeProxy('p2');
 
     const proxyManager = {
       cancelCurrentValidation() {
-        events.push('cancel-validation');
+        events.push('cancel');
       },
-      resetAutomationRotationHistory() {
-        events.push('reset-rotation-history');
+      resetRotationHistory() {
+        events.push('reset-history');
       },
-      async validateFileStreaming(
-        _filePath: string,
+      async fetchValidateAssignStreaming(
         browserIds: number[],
-        _country: string | null,
-        onAssignment: (assignment: { browserId: number; proxy: ProxyRecord }, checked: number, total: number) => void,
-        onProgress?: (checked: number, total: number, working: number, assigned: number) => void
+        onAssignment: (assignment: { browserId: number; proxy: ProxyRecord }) => void,
+        onProgress?: (checked: number, total: number, working: number, assigned: number, fetched: number) => void
       ): Promise<ReloadProxiesSummary> {
-        onProgress?.(0, 2, 0, 0);
-        onAssignment({ browserId: browserIds[0], proxy: p1 }, 1, 2);
-        onProgress?.(1, 2, 1, 1);
+        onProgress?.(0, 2, 0, 0, 2);
+        onAssignment({ browserId: browserIds[0], proxy: p1 });
+        onProgress?.(1, 2, 1, 1, 2);
 
-        // Give the assignment task a chance to apply the proxy and start
-        // its SEO search while the second proxy is still "validating".
         await Promise.resolve();
         await Promise.resolve();
         events.push('validation-still-running');
 
         if (browserIds[1] != null) {
-          onAssignment({ browserId: browserIds[1], proxy: p2 }, 2, 2);
-          onProgress?.(2, 2, 2, 2);
+          onAssignment({ browserId: browserIds[1], proxy: p2 });
+          onProgress?.(2, 2, 2, 2, 2);
         }
         events.push('validation-finished');
 
@@ -101,9 +82,9 @@ describe('SeoAutomationManager', () => {
       async assignProxy(id: number, proxy: ProxyRecord | null) {
         events.push(proxy ? `assign-${id}` : `direct-${id}`);
       },
-      async broadcastSearch(id: number, query: string, target: string) {
+      async broadcastSearch(id: number, query: string, target: string, maxPages: number) {
         events.push(`search-${id}`);
-        searches.push({ id, query, target });
+        searches.push({ id, query, target, maxPages });
         return {
           browserId: id,
           status: 'matched' as const,
@@ -117,43 +98,33 @@ describe('SeoAutomationManager', () => {
       }
     } as unknown as BrowserManager;
 
-    const settingsManager = {
-      get() {
-        return {
-          proxy: { preferredCountryCode: null },
-          browser: { seoMaxPages: 5 }
-        };
-      }
-    } as unknown as SettingsManager;
-
     const manager = new SeoAutomationManager(
       proxyManager,
       browserManager,
-      settingsManager,
-      () => [1, 2]
+      async (count) => Array.from({ length: count }, (_, index) => index + 1)
     );
 
     await manager.start({
-      sourceFilePath: filePath,
       query: 'saved keyword',
       targetWebsite: 'example.com',
       intervalSec: 600,
-      browserIds: [1, 2]
+      browserCount: 2,
+      maxPages: 37
     });
     await waitForCycle(manager);
 
-    expect(events).toContain('reset-rotation-history');
-    expect(events.indexOf('assign-1')).toBeGreaterThan(-1);
+    expect(events).toContain('reset-history');
     expect(events.indexOf('search-1')).toBeGreaterThan(events.indexOf('assign-1'));
     expect(events.indexOf('search-1')).toBeLessThan(events.indexOf('validation-finished'));
-    expect(searches.every((item) => item.query === 'saved keyword')).toBe(true);
-    expect(searches.every((item) => item.target === 'example.com')).toBe(true);
+    expect(searches.every((search) => search.query === 'saved keyword')).toBe(true);
+    expect(searches.every((search) => search.target === 'example.com')).toBe(true);
+    expect(searches.every((search) => search.maxPages === 37)).toBe(true);
 
     const firstSearchCount = searches.length;
     await manager.runNow();
     await waitForCycle(manager);
     expect(searches.length).toBeGreaterThan(firstSearchCount);
-    expect(searches.slice(firstSearchCount).every((item) => item.query === 'saved keyword')).toBe(true);
+    expect(searches.slice(firstSearchCount).every((search) => search.query === 'saved keyword')).toBe(true);
 
     manager.stop();
     expect(manager.getState().running).toBe(false);
