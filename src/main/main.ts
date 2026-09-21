@@ -55,14 +55,17 @@ async function ensureBrowserCount(count: number): Promise<number[]> {
     if (!desired.has(id)) await browserManager.destroyBrowser(id);
   }
 
-  for (const id of Array.from(desired)) {
-    if (existing.has(id)) continue;
-    await browserManager.createBrowser(id, {
-      persistSessions: false,
-      startPage: 'https://www.google.com/',
-      userAgent: ''
-    });
-  }
+  await Promise.all(
+    Array.from(desired)
+      .filter((id) => !existing.has(id))
+      .map((id) =>
+        browserManager.createBrowser(id, {
+          persistSessions: false,
+          startPage: 'about:blank',
+          userAgent: ''
+        })
+      )
+  );
 
   activeBrowserCount = normalized;
   return BROWSER_IDS.slice(0, activeBrowserCount);
@@ -75,19 +78,23 @@ async function bootstrap(): Promise<void> {
   browserManager = new BrowserManager();
   activeBrowserCount = 10;
 
-  await createWindow();
-
   automationManager = new SeoAutomationManager(
     proxyManager,
     browserManager,
     ensureBrowserCount
   );
 
+  // Register IPC before the renderer loads. The previous order allowed the
+  // React app to call automation:getState before a handler existed.
   registerIpc({
     browserManager,
     automationManager
   });
 
+  await createWindow();
+
+  // Browser shells are created concurrently and stay blank until a validated
+  // proxy is assigned. This removes ten unnecessary Google loads at startup.
   await ensureBrowserCount(activeBrowserCount);
 
   // Keep Alive is automatic after a matched Google result.
