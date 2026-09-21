@@ -2,7 +2,7 @@
 # App identity is intentionally centralized here so the product can be
 # rebranded (name, appId, icons) without touching source code.
 appId: com.proxydesk.desktop
-productName: ProxyDesk
+productName: ProxyDesk SEO Tracker
 copyright: Copyright (c) 2026 ProxyDesk
 
 directories:
@@ -35,7 +35,7 @@ win:
       arch:
         - x64
   icon: build/icons/icon.ico
-  artifactName: MultiBrowserProxySetup.${ext}
+  artifactName: ProxyDesk-SEO-Tracker-Setup.${ext}
 
 nsis:
   oneClick: false
@@ -43,8 +43,8 @@ nsis:
   allowToChangeInstallationDirectory: true
   createDesktopShortcut: true
   createStartMenuShortcut: true
-  shortcutName: ProxyDesk
-  artifactName: MultiBrowserProxySetup.${ext}
+  shortcutName: ProxyDesk SEO Tracker
+  artifactName: ProxyDesk-SEO-Tracker-Setup.${ext}
 
 # Linux/mac targets are not required by this project (Windows-only deliverable)
 # but are left buildable for local development on other platforms.

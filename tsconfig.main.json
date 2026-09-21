@@ -3,8 +3,12 @@
   "compilerOptions": {
     "module": "CommonJS",
     "moduleResolution": "Node",
-    "lib": ["ES2022"],
-    "types": ["node"],
+    "lib": [
+      "ES2022"
+    ],
+    "types": [
+      "node"
+    ],
     "outDir": "dist",
     "rootDir": "src",
     "noEmit": false,
@@ -12,9 +16,12 @@
     "sourceMap": true
   },
   "include": [
-    "src/main/**/*.ts",
-    "src/preload/**/*.ts",
-    "src/proxy/**/*.ts",
-    "src/shared/**/*.ts"
+    "src/main/main.ts",
+    "src/main/SeoBrowserManager.ts",
+    "src/main/SeoTrackerManager.ts",
+    "src/main/ProxyScrapeService.ts",
+    "src/preload/preload.ts",
+    "src/shared/ipc.ts",
+    "src/shared/tracker.ts"
   ]
 }

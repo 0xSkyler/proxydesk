@@ -1,13 +1,13 @@
 {
   "name": "proxydesk",
-  "productName": "ProxyDesk",
-  "version": "0.1.0",
-  "description": "Multi-browser proxy workspace desktop application — 10 independent, proxy-isolated Chromium sessions in one window.",
+  "productName": "ProxyDesk SEO Tracker",
+  "version": "0.4.0",
+  "description": "Lightweight Google SEO rank tracker using ProxyScrape free public proxies.",
   "author": "ProxyDesk",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/your-org/proxydesk.git"
+    "url": "https://github.com/0xSkyler/proxydesk.git"
   },
   "main": "dist/main/main.js",
   "private": true,
@@ -19,19 +19,16 @@
     "build:renderer": "vite build",
     "build:main": "tsc -p tsconfig.main.json",
     "start": "npm run build && electron .",
-    "lint": "eslint \"src/**/*.{ts,tsx}\" \"tests/**/*.ts\"",
+    "lint": "eslint src/main/main.ts src/main/SeoBrowserManager.ts src/main/SeoTrackerManager.ts src/main/ProxyScrapeService.ts src/preload/preload.ts src/shared/ipc.ts src/shared/tracker.ts src/renderer/App.tsx src/renderer/main.tsx tests/seoTrackerLite.test.ts",
     "typecheck": "tsc -p tsconfig.main.json --noEmit && tsc -p tsconfig.renderer.json --noEmit",
-    "test": "vitest run",
-    "test:watch": "vitest",
+    "test": "vitest run tests/seoTrackerLite.test.ts",
+    "test:watch": "vitest tests/seoTrackerLite.test.ts",
     "package": "npm run build && electron-builder --config electron-builder.yml --publish never",
     "package:win": "npm run build && electron-builder --config electron-builder.yml --win nsis --publish never"
   },
   "dependencies": {
-    "https-proxy-agent": "^7.0.5",
     "react": "^18.3.1",
-    "react-dom": "^18.3.1",
-    "socks-proxy-agent": "^8.0.4",
-    "zustand": "^4.5.4"
+    "react-dom": "^18.3.1"
   },
   "devDependencies": {
     "@types/node": "^20.14.9",

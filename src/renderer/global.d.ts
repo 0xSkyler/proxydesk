@@ -1,4 +1,4 @@
-import type { AppApi } from '../shared/types/ipc';
+import type { AppApi } from '../shared/ipc';
 
 declare global {
   interface Window {
