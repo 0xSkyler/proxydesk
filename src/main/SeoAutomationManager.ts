@@ -90,6 +90,9 @@ export class SeoAutomationManager extends EventEmitter {
 
     this.stopTimerOnly();
     this.proxyManager.cancelCurrentValidation();
+    // A newly started autonomous run begins a fresh proxy-usage round.
+    // Subsequent timed cycles keep the ledger so proxies genuinely rotate.
+    this.proxyManager.resetAutomationRotationHistory();
     this.generation += 1;
     this.pendingCycle = false;
 
