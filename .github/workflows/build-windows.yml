@@ -18,7 +18,7 @@ jobs:
       - name: Install Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '24'
           cache: 'npm'
 
       - name: Install dependencies
@@ -47,15 +47,15 @@ jobs:
       - name: Upload installer artifact
         uses: actions/upload-artifact@v4
         with:
-          name: MultiBrowserProxySetup-windows
-          path: release/MultiBrowserProxySetup.exe
+          name: ProxyDesk-SEO-Tracker-windows
+          path: release/ProxyDesk-SEO-Tracker-Setup.exe
           if-no-files-found: error
 
       - name: Create GitHub Release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: release/MultiBrowserProxySetup.exe
+          files: release/ProxyDesk-SEO-Tracker-Setup.exe
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
