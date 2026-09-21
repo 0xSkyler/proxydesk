@@ -13,6 +13,7 @@ export function SeoTrackerPanel(): JSX.Element {
   const [intervalSec, setIntervalSec] = useState(600);
   const [browserCount, setBrowserCount] = useState(10);
   const [maxPages, setMaxPages] = useState(20);
+  const [starting, setStarting] = useState(false);
 
   useEffect(() => {
     if (!automation) return;
@@ -42,6 +43,7 @@ export function SeoTrackerPanel(): JSX.Element {
     }
 
     clearResults();
+    setStarting(true);
     try {
       await window.app.automation.start({
         query: query.trim(),
@@ -53,6 +55,8 @@ export function SeoTrackerPanel(): JSX.Element {
       pushToast('SEO Tracker started.', 'success');
     } catch (err) {
       pushToast(`Could not start SEO Tracker: ${(err as Error).message}`, 'error');
+    } finally {
+      setStarting(false);
     }
   }
 
@@ -80,8 +84,12 @@ export function SeoTrackerPanel(): JSX.Element {
             article click → Keep Alive → rotation.
           </p>
         </div>
-        <span className={running ? 'tracker-pill tracker-pill--on' : 'tracker-pill'}>
-          {running ? (automation?.cycleInProgress ? 'RUNNING' : 'WAITING') : 'STOPPED'}
+        <span className={running || starting ? 'tracker-pill tracker-pill--on' : 'tracker-pill'}>
+          {starting
+            ? 'STARTING'
+            : running
+              ? (automation?.cycleInProgress ? 'RUNNING' : 'WAITING')
+              : 'STOPPED'}
         </span>
       </div>
 
@@ -144,8 +152,8 @@ export function SeoTrackerPanel(): JSX.Element {
       </div>
 
       <div className="tracker-actions">
-        <button className="btn-primary" disabled={running} onClick={() => void start()}>
-          Start SEO Tracker
+        <button className="btn-primary" disabled={running || starting} onClick={() => void start()}>
+          {starting ? 'Starting…' : 'Start SEO Tracker'}
         </button>
         <button disabled={!running || automation?.cycleInProgress} onClick={() => void runNow()}>
           Rotate / Run Now
