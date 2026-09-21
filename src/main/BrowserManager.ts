@@ -96,6 +96,13 @@ interface ManagedBrowser {
  * what the user/browser actually wanted instead of reloading the
  * interstitial itself. Returns null for any other URL.
  */
+export function buildEphemeralPartitionName(id: number, pid = process.pid): string {
+  // No "persist:" prefix means Electron keeps the partition in memory only.
+  // Browser id prevents sharing inside one run; process id prevents reuse
+  // after the app exits and starts again.
+  return `${EPHEMERAL_PARTITION_PREFIX}${id}-${pid}`;
+}
+
 export function extractGoogleBlockContinueUrl(url: string): string | null {
   let parsed: URL;
   try {
@@ -158,9 +165,7 @@ export class BrowserManager extends EventEmitter {
   }
 
   private partitionFor(id: number, _persist: boolean): string {
-    // Browser site data is always session-only. A new process gets a fresh
-    // in-memory partition regardless of the legacy persistSessions setting.
-    return `${EPHEMERAL_PARTITION_PREFIX}${id}-${process.pid}`;
+    return buildEphemeralPartitionName(id);
   }
 
   private async clearLegacyPersistentPartition(id: number): Promise<void> {
