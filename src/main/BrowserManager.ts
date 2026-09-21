@@ -556,6 +556,7 @@ export class BrowserManager extends EventEmitter {
       let latestScan: GoogleResultScan = { blocked: false, ready: false, resultsScanned: 0 };
       let pageMaxScanned = 0;
       let googleCommitted = false;
+      let googleCommittedAt: number | null = null;
       let autoClickInstalled = false;
       let autoClickTriggered = false;
 
@@ -608,20 +609,21 @@ export class BrowserManager extends EventEmitter {
         }
 
         googleCommitted = true;
+        if (googleCommittedAt == null) googleCommittedAt = Date.now();
 
         // Never let a slow Google subresource keep the SEO scanner blocked.
-        // Normally dom-ready schedules the stop above. If the event is lost
-        // for any reason, stop after a brief committed-page grace rather than
-        // paginating away from an already-visible result.
+        // Prefer the real dom-ready signal. Only if Electron somehow misses
+        // it do we force-stop after 750 ms from navigation commit.
         if (!googleDomReady && !googleLoadStopped) {
-          await delay(80);
-          if (isGoogleSearchResultsUrl(wc.getURL()) && wc.isLoading()) {
-            wc.stop();
-            googleLoadStopped = true;
+          if (Date.now() - googleCommittedAt < 750) {
+            await delay(25);
+            continue;
           }
+          if (isGoogleSearchResultsUrl(wc.getURL()) && wc.isLoading()) wc.stop();
+          googleLoadStopped = true;
           await delay(20);
         } else if (!googleLoadStopped && wc.isLoading()) {
-          await delay(30);
+          await delay(25);
           continue;
         }
 
