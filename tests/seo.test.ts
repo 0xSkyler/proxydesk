@@ -24,4 +24,11 @@ describe('SEO helpers', () => {
     expect(resultTextMentionsHost('www.appareldiary.com/article/test', 'appareldiary.com')).toBe(true);
     expect(resultTextMentionsHost('notappareldiary.com/article/test', 'appareldiary.com')).toBe(false);
   });
+
+  it('accepts a bare website name and resolves it against a real result host', () => {
+    expect(resultTextMentionsHost('appareldiary.com › article › rmg-cutting', 'appareldiary')).toBe(true);
+    expect(hostMatchesTarget('https://appareldiary.com/article/rmg-cutting', 'appareldiary')).toBe(true);
+    expect(hostMatchesTarget('https://shop.appareldiary.com/article/rmg-cutting', 'appareldiary')).toBe(true);
+    expect(hostMatchesTarget('https://notappareldiary.com/article/rmg-cutting', 'appareldiary')).toBe(false);
+  });
 });
