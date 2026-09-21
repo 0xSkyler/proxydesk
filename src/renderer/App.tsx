@@ -1,132 +1,287 @@
-import { useEffect, useState } from 'react';
-import { useAppStore } from './stores/appStore';
-import { useAppData } from './hooks/useAppData';
-import { useKeyboardShortcuts } from './hooks/useKeyboardShortcuts';
-import { BrowserGrid } from './components/BrowserGrid';
-import { ProxyToolbar } from './components/ProxyToolbar';
-import { ProxyManagerTable } from './components/ProxyManagerTable';
-import { BrowserAssignmentView } from './components/BrowserAssignmentView';
-import { Settings } from './components/Settings';
-import { DiagnosticsPanel } from './components/DiagnosticsPanel';
-import { BroadcastSearchPanel } from './components/BroadcastSearchPanel';
-import { Toasts } from './components/Toasts';
-import type { DiagnosticsInfo } from '../shared/types/ipc';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import type {
+  BrowserState,
+  ProxyFetchSummary,
+  ProxyFilter,
+  TrackerConfig,
+  TrackerState
+} from '../shared/tracker';
 
-function useTheme(): void {
-  const theme = useAppStore((s) => s.settings.application.theme);
+const DEFAULT_CONFIG: TrackerConfig = {
+  query: '',
+  target: '',
+  maxPages: 5,
+  browserCount: 4,
+  proxyFilter: 'all'
+};
+
+const DEFAULT_STATE: TrackerState = {
+  running: false,
+  proxiesFetched: 0,
+  browserCount: 4,
+  results: []
+};
+
+export default function App(): JSX.Element {
+  const [config, setConfig] = useState<TrackerConfig>(DEFAULT_CONFIG);
+  const [tracker, setTracker] = useState<TrackerState>(DEFAULT_STATE);
+  const [browsers, setBrowsers] = useState<Record<number, BrowserState>>({});
+  const [proxySummary, setProxySummary] = useState<ProxyFetchSummary | null>(null);
+  const [message, setMessage] = useState<string>('');
+
   useEffect(() => {
-    const root = document.documentElement;
-    if (theme === 'system') {
-      const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
-      root.dataset.theme = prefersDark ? 'dark' : 'light';
-    } else {
-      root.dataset.theme = theme;
-    }
-  }, [theme]);
-}
+    let active = true;
 
-function StatusBar(): JSX.Element {
-  const [memory, setMemory] = useState<DiagnosticsInfo['memory'] | null>(null);
+    void Promise.all([window.app.tracker.getState(), window.app.browser.getAll()]).then(([state, list]) => {
+      if (!active) return;
+      setTracker(state);
+      setBrowsers(Object.fromEntries(list.map((browser) => [browser.id, browser])));
+    });
 
-  useEffect(() => {
-    let mounted = true;
-    const load = () => window.app.system.getDiagnostics().then((d) => mounted && setMemory(d.memory));
-    void load();
-    const interval = setInterval(load, 8000);
+    const offTracker = window.app.tracker.onStateChanged((state) => setTracker(state));
+    const offBrowser = window.app.browser.onStateChanged((state) => {
+      setBrowsers((current) => ({ ...current, [state.id]: state }));
+    });
+
     return () => {
-      mounted = false;
-      clearInterval(interval);
+      active = false;
+      offTracker();
+      offBrowser();
     };
   }, []);
 
-  const summary = useAppStore((s) => s.lastReloadSummary);
-  const proxies = useAppStore((s) => s.proxies);
+  async function start(): Promise<void> {
+    setMessage('');
+    try {
+      const state = await window.app.tracker.start(config);
+      setTracker(state);
+    } catch (err) {
+      setMessage((err as Error).message);
+    }
+  }
+
+  async function stop(): Promise<void> {
+    const state = await window.app.tracker.stop();
+    setTracker(state);
+  }
+
+  async function refreshProxies(): Promise<void> {
+    setMessage('');
+    try {
+      const summary = await window.app.tracker.refreshProxies();
+      setProxySummary(summary);
+      setMessage(`Fetched ${summary.fetched} public proxies from ProxyScrape.`);
+    } catch (err) {
+      setMessage((err as Error).message);
+    }
+  }
+
+  const ids = useMemo(
+    () => Array.from({ length: tracker.browserCount }, (_, index) => index + 1),
+    [tracker.browserCount]
+  );
 
   return (
-    <footer className="status-bar">
-      <span>RAM: {memory ? `${memory.rssMb} MB` : '—'}</span>
-      <span>
-        {summary
-          ? `Last assign: ${summary.working}/${summary.found} working, ${
-              summary.assignments.filter((a) => a.proxy).length
-            }/${summary.assignments.length} assigned`
-          : 'No proxies assigned yet'}
-      </span>
-      <span className={proxies.length === 0 ? 'status-bad' : 'status-ok'}>
-        {proxies.length === 0 ? 'No proxies imported yet' : `${proxies.length} proxies in pool`}
-      </span>
-    </footer>
+    <div className="tracker-app">
+      <header className="tracker-header">
+        <div>
+          <h1>ProxyDesk SEO Tracker</h1>
+          <p>Google rank search with live public proxies from ProxyScrape.</p>
+        </div>
+        <div className={tracker.running ? 'run-badge run-badge--active' : 'run-badge'}>
+          {tracker.running ? 'SEARCHING' : 'IDLE'}
+        </div>
+      </header>
+
+      <section className="controls">
+        <label className="field field--wide">
+          Search query
+          <input
+            value={config.query}
+            disabled={tracker.running}
+            onChange={(event) => setConfig((current) => ({ ...current, query: event.target.value }))}
+            placeholder="e.g. rmg cutting"
+          />
+        </label>
+
+        <label className="field field--wide">
+          Target website / site name
+          <input
+            value={config.target}
+            disabled={tracker.running}
+            onChange={(event) => setConfig((current) => ({ ...current, target: event.target.value }))}
+            placeholder="appareldiary.com or appareldiary"
+          />
+        </label>
+
+        <label className="field">
+          Max Google pages
+          <input
+            type="number"
+            min={1}
+            max={20}
+            value={config.maxPages}
+            disabled={tracker.running}
+            onChange={(event) =>
+              setConfig((current) => ({ ...current, maxPages: Number(event.target.value) }))
+            }
+          />
+        </label>
+
+        <label className="field">
+          Browsers
+          <input
+            type="number"
+            min={1}
+            max={20}
+            value={config.browserCount}
+            disabled={tracker.running}
+            onChange={(event) =>
+              setConfig((current) => ({ ...current, browserCount: Number(event.target.value) }))
+            }
+          />
+        </label>
+
+        <label className="field">
+          Proxy protocol
+          <select
+            value={config.proxyFilter}
+            disabled={tracker.running}
+            onChange={(event) =>
+              setConfig((current) => ({ ...current, proxyFilter: event.target.value as ProxyFilter }))
+            }
+          >
+            <option value="all">All</option>
+            <option value="http">HTTP</option>
+            <option value="https">HTTPS</option>
+            <option value="socks4">SOCKS4</option>
+            <option value="socks5">SOCKS5</option>
+          </select>
+        </label>
+
+        <div className="actions">
+          <button className="primary" disabled={tracker.running} onClick={() => void start()}>
+            Start SEO Search
+          </button>
+          <button disabled={!tracker.running} onClick={() => void stop()}>
+            Stop
+          </button>
+          <button disabled={tracker.running} onClick={() => void refreshProxies()}>
+            Refresh ProxyScrape
+          </button>
+        </div>
+      </section>
+
+      <section className="summary-row">
+        <span>ProxyScrape: {tracker.proxiesFetched || proxySummary?.fetched || 0} proxies</span>
+        <span>Browsers: {tracker.browserCount}</span>
+        <span>Page limit: {config.maxPages}</span>
+        <span>Completed: {tracker.results.length}/{tracker.browserCount}</span>
+        {proxySummary && (
+          <span>
+            HTTP {proxySummary.protocols.http} · HTTPS {proxySummary.protocols.https} · SOCKS4{' '}
+            {proxySummary.protocols.socks4} · SOCKS5 {proxySummary.protocols.socks5}
+          </span>
+        )}
+      </section>
+
+      {message && <div className="message">{message}</div>}
+
+      <main className="browser-area">
+        <div className="browser-grid">
+          {ids.map((id) => (
+            <BrowserTile key={id} id={id} state={browsers[id]} />
+          ))}
+        </div>
+      </main>
+
+      <section className="results-panel">
+        <h2>Results</h2>
+        <div className="results-scroll">
+          <table>
+            <thead>
+              <tr>
+                <th>Browser</th>
+                <th>Status</th>
+                <th>Proxy</th>
+                <th>Page</th>
+                <th>Position</th>
+                <th>Matched URL / Error</th>
+              </tr>
+            </thead>
+            <tbody>
+              {tracker.results.map((result) => (
+                <tr key={result.browserId}>
+                  <td>Browser {result.browserId}</td>
+                  <td className={`result-status result-status--${result.status}`}>{result.status}</td>
+                  <td>
+                    {result.proxy
+                      ? `${result.proxy.protocol}://${result.proxy.host}:${result.proxy.port}`
+                      : '—'}
+                  </td>
+                  <td>{result.page ?? '—'}</td>
+                  <td>{result.position ?? '—'}</td>
+                  <td className="result-detail">{result.matchedUrl ?? result.error ?? '—'}</td>
+                </tr>
+              ))}
+              {tracker.results.length === 0 && (
+                <tr>
+                  <td colSpan={6} className="empty">
+                    No completed searches yet.
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </div>
   );
 }
 
-export default function App(): JSX.Element {
-  useAppData();
-  useTheme();
+function BrowserTile({ id, state }: { id: number; state?: BrowserState }): JSX.Element {
+  const viewportRef = useRef<HTMLDivElement>(null);
 
-  const activePanel = useAppStore((s) => s.activePanel);
-  const setActivePanel = useAppStore((s) => s.setActivePanel);
-  const openModalCount = useAppStore((s) => s.openModalCount);
-  const [ready, setReady] = useState(false);
+  const reportBounds = useCallback(() => {
+    const element = viewportRef.current;
+    if (!element) return;
+    const rect = element.getBoundingClientRect();
+    void window.app.browser.setBounds(id, {
+      x: Math.round(rect.x),
+      y: Math.round(rect.y),
+      width: Math.max(1, Math.round(rect.width)),
+      height: Math.max(1, Math.round(rect.height))
+    });
+  }, [id]);
 
   useEffect(() => {
-    const timer = setTimeout(() => setReady(true), 300);
-    return () => clearTimeout(timer);
-  }, []);
+    reportBounds();
+    const observer = new ResizeObserver(reportBounds);
+    if (viewportRef.current) observer.observe(viewportRef.current);
+    window.addEventListener('resize', reportBounds);
+    window.addEventListener('scroll', reportBounds, true);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener('resize', reportBounds);
+      window.removeEventListener('scroll', reportBounds, true);
+    };
+  }, [reportBounds]);
 
-  useKeyboardShortcuts({
-    onReloadSelected: () => void window.app.browser.reload(useAppStore.getState().browsers[1]?.id ?? 1),
-    onReloadAll: () => void window.app.browser.reloadAll(),
-    onOpenProxyManager: () => setActivePanel('proxyManager'),
-    onReloadProxies: () => void window.app.proxy.reload(useAppStore.getState().selectedCountry),
-    onOpenSettings: () => setActivePanel('settings')
-  });
-
-  if (!ready) {
-    return (
-      <div className="startup-screen">
-        <h1>ProxyDesk</h1>
-        <p>Initializing…</p>
-        <ul>
-          <li>✓ Configuration</li>
-          <li>✓ Imported proxies</li>
-          <li>✓ Browser sessions</li>
-        </ul>
-      </div>
-    );
-  }
+  const status = state?.status ?? 'idle';
+  const proxy = state?.proxy;
 
   return (
-    <div className="app-shell">
-      <ProxyToolbar />
-      <main className="app-shell__main">
-        {/* BrowserGrid stays mounted (never display:none) even when another
-            panel is active, so its ResizeObservers keep firing and its
-            BrowserPanels keep reporting real bounds to the main process.
-            When another panel is showing — or a modal dialog (e.g. Import
-            Proxies) is open on top of the grid itself, tracked via
-            openModalCount rather than activePanel since a dialog like that
-            opens without switching panels — this wrapper is pushed
-            off-screen with a fixed position instead of hidden, so the
-            underlying BrowserViews (real Chromium content, positioned
-            independently of React's DOM by the main process, and always
-            painted above ordinary DOM content regardless of z-index) move
-            off-screen with it rather than floating on top of whatever's
-            visible. */}
-        <div
-          className={
-            activePanel === 'grid' && openModalCount === 0 ? 'grid-wrapper' : 'grid-wrapper grid-wrapper--offscreen'
-          }
-        >
-          <BrowserGrid />
-        </div>
-        {activePanel === 'proxyManager' && <ProxyManagerTable />}
-        {activePanel === 'assignments' && <BrowserAssignmentView />}
-        {activePanel === 'settings' && <Settings />}
-        {activePanel === 'diagnostics' && <DiagnosticsPanel />}
-        {activePanel === 'broadcast' && <BroadcastSearchPanel />}
-      </main>
-      <StatusBar />
-      <Toasts />
-    </div>
+    <article className="browser-tile">
+      <div className="browser-tile__header">
+        <strong>{state?.label ?? `Browser ${id}`}</strong>
+        <span className={`status-pill status-pill--${status}`}>{status}</span>
+        <span className="page-label">{state?.currentPage ? `Page ${state.currentPage}` : ''}</span>
+      </div>
+      <div className="browser-tile__viewport" ref={viewportRef} />
+      <div className="browser-tile__footer">
+        <span>{proxy ? `${proxy.protocol}://${proxy.host}:${proxy.port}` : 'Waiting for proxy'}</span>
+        <span>{state?.message ?? ''}</span>
+      </div>
+    </article>
   );
 }
