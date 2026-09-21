@@ -17,12 +17,11 @@ export interface ProxyScrapeFetchOptions {
  * filtering by protocol and timeout. We request protocol-qualified output so
  * the existing parser can preserve HTTP / SOCKS4 / SOCKS5 correctly.
  */
-export async function fetchProxyScrapeFreeList(
-  options: ProxyScrapeFetchOptions = {}
-): Promise<string> {
+export function buildProxyScrapeFreeListUrl(
+  options: Pick<ProxyScrapeFetchOptions, 'limit' | 'timeoutFilterMs'> = {}
+): URL {
   const limit = Math.max(1, Math.min(2000, Math.floor(options.limit ?? 2000)));
   const timeoutFilterMs = Math.max(1000, Math.min(15_000, Math.floor(options.timeoutFilterMs ?? 7000)));
-  const requestTimeoutMs = Math.max(3000, Math.min(30_000, Math.floor(options.requestTimeoutMs ?? 15_000)));
 
   const url = new URL(PROXYSCRAPE_FREE_API);
   url.searchParams.set('request', 'display_proxies');
@@ -32,6 +31,14 @@ export async function fetchProxyScrapeFreeList(
   url.searchParams.set('limit', String(limit));
   url.searchParams.set('proxy_format', 'protocolipport');
   url.searchParams.set('format', 'text');
+  return url;
+}
+
+export async function fetchProxyScrapeFreeList(
+  options: ProxyScrapeFetchOptions = {}
+): Promise<string> {
+  const requestTimeoutMs = Math.max(3000, Math.min(30_000, Math.floor(options.requestTimeoutMs ?? 15_000)));
+  const url = buildProxyScrapeFreeListUrl(options);
 
   return new Promise<string>((resolve, reject) => {
     if (options.signal?.aborted) {
