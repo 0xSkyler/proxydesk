@@ -63,22 +63,20 @@ export function parseProxyScrapeText(text: string): ProxyEndpoint[] {
     const line = rawLine.trim();
     if (!line || line.startsWith('#')) continue;
 
-    try {
-      const url = new URL(line.includes('://') ? line : `http://${line}`);
-      const protocol = url.protocol.replace(':', '').toLowerCase() as ProxyProtocol;
-      if (!PROTOCOLS.has(protocol)) continue;
+    const match = line.match(/^(?:(http|https|socks4|socks5):\/\/)?(\[[^\]]+\]|[^:\s]+):(\d{1,5})$/i);
+    if (!match) continue;
 
-      const host = url.hostname.trim();
-      const port = Number(url.port);
-      if (!host || !Number.isInteger(port) || port < 1 || port > 65535) continue;
+    const protocol = (match[1] ?? 'http').toLowerCase() as ProxyProtocol;
+    if (!PROTOCOLS.has(protocol)) continue;
 
-      const id = `${protocol}://${host}:${port}`;
-      if (seen.has(id)) continue;
-      seen.add(id);
-      proxies.push({ id, protocol, host, port });
-    } catch {
-      // Ignore malformed public-list rows.
-    }
+    const host = match[2].replace(/^\[|\]$/g, '').trim();
+    const port = Number(match[3]);
+    if (!host || !Number.isInteger(port) || port < 1 || port > 65535) continue;
+
+    const id = `${protocol}://${host}:${port}`;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    proxies.push({ id, protocol, host, port });
   }
 
   return proxies;
