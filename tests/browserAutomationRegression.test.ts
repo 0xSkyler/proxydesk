@@ -1,0 +1,96 @@
+import vm from 'node:vm';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+
+vi.mock('electron', () => ({
+  app: { on: vi.fn() },
+  BrowserView: class {},
+  BrowserWindow: class {},
+  clipboard: { writeText: vi.fn() },
+  session: { fromPartition: vi.fn() }
+}));
+
+import { BrowserManager, buildGoogleResultScanScript } from '../src/main/BrowserManager';
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
+
+describe('browser automation regressions', () => {
+  it('arms and executes Keep Alive from the individual browser control', async () => {
+    const executeJavaScript = vi.fn().mockResolvedValue({ links: [] });
+    const webContents = {
+      getURL: () => 'https://appareldiary.com/article/test',
+      isDestroyed: () => false,
+      isLoading: () => false,
+      executeJavaScript
+    };
+    const managed = {
+      id: 1,
+      view: { webContents },
+      session: {},
+      state: { id: 1, keepAliveEnabled: false, keepAliveHops: 0 },
+      restartAttempts: 0,
+      googleBlockRetries: 0,
+      keepAliveEnabled: false,
+      keepAliveHops: 0,
+      keepAliveNextAt: 0,
+      keepAliveBusy: false,
+      keepAliveVisited: new Set<string>()
+    };
+
+    const manager = new BrowserManager();
+    const internals = manager as unknown as {
+      browsers: Map<number, unknown>;
+      tickKeepAlive(): void;
+      keepAliveTimer: NodeJS.Timeout | null;
+    };
+    internals.browsers.set(1, managed);
+
+    manager.setBrowserKeepAlive(1, true, true);
+    managed.keepAliveNextAt = 0;
+    internals.tickKeepAlive();
+
+    await vi.waitFor(() => expect(executeJavaScript).toHaveBeenCalledTimes(1));
+    expect(managed.keepAliveEnabled).toBe(false);
+    expect(internals.keepAliveTimer).not.toBeNull();
+
+    if (internals.keepAliveTimer) clearInterval(internals.keepAliveTimer);
+  });
+
+  it('finds a visible target result even when Google does not wrap it in an h3', () => {
+    const targetUrl = 'https://appareldiary.com/article/safety-stock';
+    const container = { innerText: 'ApparelDiary.com › article › safety-stock\nOne Safety Stock Rule Does Not Fit a Trims Store' };
+    const anchor = {
+      href: targetUrl,
+      innerText: 'One Safety Stock Rule Does Not Fit a Trims Store',
+      getAttribute: (name: string) => (name === 'href' ? targetUrl : null),
+      querySelector: () => null,
+      closest: () => container,
+      parentElement: null
+    };
+    const searchRoot = { querySelectorAll: () => [anchor] };
+    const document = {
+      body: { innerText: 'Google Search results' },
+      readyState: 'complete',
+      querySelector: (selector: string) => (selector === '#search' ? searchRoot : null)
+    };
+    const location = { href: 'https://www.google.com/search?q=safety+stock' };
+
+    const result = vm.runInNewContext(buildGoogleResultScanScript('appareldiary.com'), {
+      window: { location },
+      location,
+      document,
+      URL
+    }) as {
+      blocked: boolean;
+      ready: boolean;
+      resultsScanned: number;
+      match?: { url: string; title: string; organicIndex: number };
+    };
+
+    expect(result.blocked).toBe(false);
+    expect(result.ready).toBe(true);
+    expect(result.resultsScanned).toBe(1);
+    expect(result.match?.url).toBe(targetUrl);
+  });
+});
