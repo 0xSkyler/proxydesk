@@ -521,12 +521,12 @@ export class BrowserManager extends EventEmitter {
       // after navigation finishes, but Google results can already be visible
       // and clickable long before images/scripts/other resources finish.
       // Start navigation and scan the newly committed Google DOM in parallel.
-      let navigationError: Error | null = null;
+      let navigationErrorMessage: string | null = null;
       void wc.loadURL(searchUrl).catch((err) => {
         const message = (err as Error).message || String(err);
         // Clicking a result while Google is still loading intentionally
         // aborts the original search navigation. That is a success path.
-        if (!/ERR_ABORTED|-3/i.test(message)) navigationError = err as Error;
+        if (!/ERR_ABORTED|-3/i.test(message)) navigationErrorMessage = message;
       });
 
       const scanDeadline = Date.now() + 12_000;
@@ -553,11 +553,11 @@ export class BrowserManager extends EventEmitter {
           // During the short handoff from the previous document to Google,
           // executeJavaScript would still address the old/destroyed world.
           // Wait only a few milliseconds for the search URL to commit.
-          if (navigationError) {
+          if (navigationErrorMessage) {
             return {
               browserId: id,
               status: 'error',
-              error: `Failed to load Google results page ${pageIndex + 1}: ${navigationError.message}`,
+              error: `Failed to load Google results page ${pageIndex + 1}: ${navigationErrorMessage}`,
               ranAt
             };
           }
@@ -594,11 +594,11 @@ export class BrowserManager extends EventEmitter {
         await delay(latestScan.ready ? 100 : 80);
       }
 
-      if (!googleCommitted && navigationError) {
+      if (!googleCommitted && navigationErrorMessage) {
         return {
           browserId: id,
           status: 'error',
-          error: `Failed to load Google results page ${pageIndex + 1}: ${navigationError.message}`,
+          error: `Failed to load Google results page ${pageIndex + 1}: ${navigationErrorMessage}`,
           ranAt
         };
       }
