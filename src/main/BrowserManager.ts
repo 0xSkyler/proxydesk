@@ -1294,7 +1294,9 @@ export function buildGoogleResultScanScript(targetHost: string): string {
       function destinationMatches(url) {
         try {
           var host = normalizeHost(new URL(url, location.href).hostname);
-          return host === target || host.endsWith('.' + target);
+          if (host === target || host.endsWith('.' + target)) return true;
+          if (target.indexOf('.') === -1 && host.split('.').indexOf(target) !== -1) return true;
+          return false;
         } catch (_) {
           return false;
         }
@@ -1470,7 +1472,9 @@ export function buildClickGoogleTargetResultScript(targetHost: string): string {
       function destinationMatches(url) {
         try {
           var host = normalizeHost(new URL(url, location.href).hostname);
-          return host === target || host.endsWith('.' + target);
+          if (host === target || host.endsWith('.' + target)) return true;
+          if (target.indexOf('.') === -1 && host.split('.').indexOf(target) !== -1) return true;
+          return false;
         } catch (_) {
           return false;
         }
