@@ -3,7 +3,7 @@ import { app, BrowserView, BrowserWindow, clipboard, session, type Session } fro
 import type { BroadcastSearchResult, BrowserBounds, BrowserState } from '../shared/types/browser';
 import type { ProxyRecord } from '../shared/types/proxy';
 import { EPHEMERAL_PARTITION_PREFIX, PARTITION_PREFIX } from '../shared/constants';
-import { buildGoogleSearchUrl, hostMatchesTarget, normalizeTargetHost } from '../shared/seo';
+import { buildGoogleSearchUrl, hostMatchesTarget, normalizeTargetHost, resultTextMentionsHost } from '../shared/seo';
 import { logger } from './Logger';
 
 /**
@@ -651,6 +651,13 @@ export class BrowserManager extends EventEmitter {
     clipboard.writeText(text);
   }
 
+  private ensureKeepAliveTimer(): void {
+    if (this.keepAliveTimer) return;
+    // Keep the driver independent from bootstrap timing. Individual browser
+    // buttons can therefore start Keep Alive even during late initialization.
+    this.keepAliveTimer = setInterval(() => this.tickKeepAlive(), 500);
+  }
+
   configureKeepAlive(intervalMs: number, maxHops: number, _followLinks: boolean): void {
     this.keepAliveIntervalMs = Math.max(5_000, Math.min(3_600_000, Math.floor(intervalMs || 60_000)));
     // This central value is the maximum number of content pages processed
@@ -659,10 +666,7 @@ export class BrowserManager extends EventEmitter {
     // Enhanced Keep Alive always follows eligible same-site content after
     // completing the full-page scroll cycles, as requested.
     this.keepAliveFollowLinks = true;
-
-    if (!this.keepAliveTimer) {
-      this.keepAliveTimer = setInterval(() => this.tickKeepAlive(), 1000);
-    }
+    this.ensureKeepAliveTimer();
   }
 
   setKeepAlive(enabled: boolean, intervalMs: number): void {
@@ -671,6 +675,7 @@ export class BrowserManager extends EventEmitter {
   }
 
   setBrowserKeepAlive(id: number, enabled: boolean, resetHops = false): void {
+    this.ensureKeepAliveTimer();
     const managed = this.get(id);
     managed.keepAliveEnabled = enabled;
     if (resetHops) {
@@ -679,14 +684,16 @@ export class BrowserManager extends EventEmitter {
       const currentUrl = managed.view.webContents.getURL();
       if (currentUrl) managed.keepAliveVisited.add(currentUrl);
     }
-    managed.keepAliveNextAt = Date.now() + Math.min(1000, this.keepAliveIntervalMs);
+    managed.keepAliveNextAt = enabled ? Date.now() + 100 : Number.POSITIVE_INFINITY;
     this.updateState(managed, {
       keepAliveEnabled: enabled,
       keepAliveHops: managed.keepAliveHops
     });
+    if (enabled) queueMicrotask(() => this.tickKeepAlive());
   }
 
   setKeepAliveAll(enabled: boolean, resetHops = false): void {
+    this.ensureKeepAliveTimer();
     for (const managed of this.browsers.values()) {
       managed.keepAliveEnabled = enabled;
       if (resetHops) {
@@ -695,12 +702,13 @@ export class BrowserManager extends EventEmitter {
         const currentUrl = managed.view.webContents.getURL();
         if (currentUrl) managed.keepAliveVisited.add(currentUrl);
       }
-      managed.keepAliveNextAt = Date.now() + Math.min(1000, this.keepAliveIntervalMs);
+      managed.keepAliveNextAt = enabled ? Date.now() + 100 : Number.POSITIVE_INFINITY;
       this.updateState(managed, {
         keepAliveEnabled: enabled,
         keepAliveHops: managed.keepAliveHops
       });
     }
+    if (enabled) queueMicrotask(() => this.tickKeepAlive());
   }
 
   private tickKeepAlive(): void {
@@ -709,8 +717,10 @@ export class BrowserManager extends EventEmitter {
       if (!managed.keepAliveEnabled || managed.keepAliveBusy || now < managed.keepAliveNextAt) continue;
 
       const wc = managed.view.webContents;
-      if (wc.isDestroyed() || managed.state.loading) {
-        managed.keepAliveNextAt = now + 2000;
+      // Query Chromium directly instead of trusting a renderer-facing
+      // loading flag that can remain stale after an aborted navigation.
+      if (wc.isDestroyed() || wc.isLoading()) {
+        managed.keepAliveNextAt = now + 750;
         continue;
       }
 
@@ -767,9 +777,14 @@ export class BrowserManager extends EventEmitter {
         keepAliveHops: managed.keepAliveHops,
         lastKeepAliveAt: completedAt
       });
-    } catch {
+    } catch (err) {
       // A navigation can make script execution temporarily unavailable.
-      // Keep Alive retries on its next scheduled tick.
+      // Retry, but record the reason instead of silently doing nothing.
+      logger.warn(
+        'browser',
+        `Browser ${managed.id}: Keep Alive action failed: ${(err as Error).message}`
+      );
+      managed.keepAliveNextAt = Date.now() + 1500;
     }
   }
 }
@@ -777,8 +792,13 @@ export class BrowserManager extends EventEmitter {
 function buildKeepAliveActionScript(allowHop: boolean): string {
   return `(async () => {
     const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-    const root = document.scrollingElement || document.documentElement;
-    const maxScroll = () => Math.max(0, root.scrollHeight - window.innerHeight);
+    const root = document.scrollingElement || document.documentElement || document.body;
+    const pageHeight = () => Math.max(
+      root ? root.scrollHeight : 0,
+      document.documentElement ? document.documentElement.scrollHeight : 0,
+      document.body ? document.body.scrollHeight : 0
+    );
+    const maxScroll = () => Math.max(0, pageHeight() - window.innerHeight);
 
     const animateScrollTo = (target, duration) =>
       new Promise((resolve) => {
@@ -805,8 +825,13 @@ function buildKeepAliveActionScript(allowHop: boolean): string {
 
     const cycles = 6 + Math.floor(Math.random() * 3); // 6, 7 or 8
     if (maxScroll() > 0) {
-      await animateScrollTo(0, 1200);
-      await wait(500);
+      // Immediate visible feedback, then the requested full cycles.
+      window.scrollTo(0, Math.min(180, maxScroll()));
+      await wait(140);
+      window.scrollTo(0, 0);
+      await wait(180);
+      await animateScrollTo(0, 700);
+      await wait(250);
 
       for (let cycle = 0; cycle < cycles; cycle += 1) {
         const downDuration = 3400 + Math.floor(Math.random() * 1600);
