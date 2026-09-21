@@ -4,6 +4,7 @@ import {
   normalizeBrowserCount,
   normalizeSeoMaxPages
 } from '../src/shared/types/automation';
+import { BROWSER_IDS } from '../src/shared/types/browser';
 
 describe('SEO Tracker normalization', () => {
   it('normalizes rotation interval', () => {
@@ -17,6 +18,8 @@ describe('SEO Tracker normalization', () => {
     expect(normalizeBrowserCount(0)).toBe(1);
     expect(normalizeBrowserCount(10)).toBe(10);
     expect(normalizeBrowserCount(101)).toBe(100);
+    expect(BROWSER_IDS).toHaveLength(100);
+    expect(new Set(BROWSER_IDS).size).toBe(100);
   });
 
   it('allows scanning 1-100 Google result pages', () => {
