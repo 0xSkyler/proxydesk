@@ -946,29 +946,39 @@ function buildGoogleResultScanScript(targetHost: string): string {
         }
       }
 
-      var headings = Array.prototype.slice.call(document.querySelectorAll('h3'));
+      var displayMentionsTarget = ${resultTextMentionsHost.toString()};
+      var searchRoot = document.querySelector('#search') || document.querySelector('#rso') || document.querySelector('main') || document.body;
       var anchors = [];
-      headings.forEach(function (h3) {
-        var anchor = h3.closest('a');
-        if (anchor && anchors.indexOf(anchor) === -1) anchors.push(anchor);
+      Array.prototype.slice.call(searchRoot ? searchRoot.querySelectorAll('a[href]') : []).forEach(function (anchor) {
+        if (anchors.indexOf(anchor) !== -1) return;
+        var rawHref = anchor.getAttribute('href') || anchor.href || '';
+        var destination = unwrap(rawHref);
+        var container = anchor.closest('.MjjYud, .g, [data-snhf]') ||
+          (anchor.parentElement && anchor.parentElement.parentElement && anchor.parentElement.parentElement.parentElement) ||
+          anchor.parentElement || anchor;
+        var nearbyText = ((container && container.innerText) || anchor.innerText || '').slice(0, 1200);
+        var displayText = nearbyText.toLowerCase().replace(/www\\./g, '');
+        var hasResultHeading = Boolean(anchor.querySelector('h3'));
+        var hasTargetSignal = destinationMatches(destination) || displayMentionsTarget(displayText, target);
+        if (hasResultHeading || hasTargetSignal) anchors.push(anchor);
       });
 
       var resultsScanned = 0;
       for (var i = 0; i < anchors.length; i += 1) {
         var anchor = anchors[i];
         var titleNode = anchor.querySelector('h3');
-        if (!titleNode) continue;
+        var titleText = ((titleNode && titleNode.innerText) || anchor.getAttribute('aria-label') || anchor.innerText || '').trim();
 
-        var container = anchor.parentElement && anchor.parentElement.parentElement
-          ? anchor.parentElement.parentElement
-          : anchor.parentElement || anchor;
-        var nearbyText = ((container && container.innerText) || anchor.innerText || '').slice(0, 700);
-        if (/\\bSponsored\\b/i.test(nearbyText.slice(0, 140))) continue;
+        var container = anchor.closest('.MjjYud, .g, [data-snhf]') ||
+          (anchor.parentElement && anchor.parentElement.parentElement && anchor.parentElement.parentElement.parentElement) ||
+          anchor.parentElement || anchor;
+        var nearbyText = ((container && container.innerText) || anchor.innerText || '').slice(0, 1200);
+        if (/\\bSponsored\\b/i.test(nearbyText.slice(0, 180))) continue;
 
         var rawHref = anchor.getAttribute('href') || anchor.href || '';
         var destination = unwrap(rawHref);
         var displayText = nearbyText.toLowerCase().replace(/www\\./g, '');
-        var matched = destinationMatches(destination) || displayText.includes(target);
+        var matched = destinationMatches(destination) || displayMentionsTarget(displayText, target);
 
         resultsScanned += 1;
         if (matched) {
@@ -978,7 +988,7 @@ function buildGoogleResultScanScript(targetHost: string): string {
             resultsScanned: resultsScanned,
             match: {
               url: destination,
-              title: titleNode.innerText || '',
+              title: titleText,
               organicIndex: resultsScanned - 1
             }
           };
@@ -1000,6 +1010,7 @@ function buildClickGoogleTargetResultScript(targetHost: string): string {
   return `(function() {
     try {
       var target = ${JSON.stringify(targetHost.toLowerCase())};
+      var displayMentionsTarget = ${resultTextMentionsHost.toString()};
 
       function unwrap(href) {
         try {
@@ -1027,22 +1038,27 @@ function buildClickGoogleTargetResultScript(targetHost: string): string {
         }
       }
 
-      var headings = Array.prototype.slice.call(document.querySelectorAll('h3'));
-      for (var i = 0; i < headings.length; i += 1) {
-        var anchor = headings[i].closest('a');
-        if (!anchor) continue;
-
-        var container = anchor.parentElement && anchor.parentElement.parentElement
-          ? anchor.parentElement.parentElement
-          : anchor.parentElement || anchor;
-        var nearbyText = ((container && container.innerText) || anchor.innerText || '').slice(0, 700);
-        if (/\\bSponsored\\b/i.test(nearbyText.slice(0, 140))) continue;
-
+      var searchRoot = document.querySelector('#search') || document.querySelector('#rso') || document.querySelector('main') || document.body;
+      var anchors = Array.prototype.slice.call(searchRoot ? searchRoot.querySelectorAll('a[href]') : []);
+      for (var i = 0; i < anchors.length; i += 1) {
+        var anchor = anchors[i];
         var destination = unwrap(anchor.getAttribute('href') || anchor.href || '');
-        var displayText = nearbyText.toLowerCase().replace(/www\\./g, '');
-        if (!destinationMatches(destination) && !displayText.includes(target)) continue;
+        var container = anchor.closest('.MjjYud, .g, [data-snhf]') ||
+          (anchor.parentElement && anchor.parentElement.parentElement && anchor.parentElement.parentElement.parentElement) ||
+          anchor.parentElement || anchor;
+        var nearbyText = ((container && container.innerText) || anchor.innerText || '').slice(0, 1200);
+        if (/\\bSponsored\\b/i.test(nearbyText.slice(0, 180))) continue;
 
+        var displayText = nearbyText.toLowerCase().replace(/www\\./g, '');
+        var directMatch = destinationMatches(destination);
+        var textMatch = displayMentionsTarget(displayText, target);
+        if (!directMatch && !textMatch) continue;
+
+        // Prefer the actual result-title/citation anchor. A visible target
+        // citation is still accepted when Google changes the heading markup.
+        if (!anchor.querySelector('h3') && !directMatch && !displayMentionsTarget(anchor.innerText || '', target)) continue;
         anchor.scrollIntoView({ block: 'center', behavior: 'auto' });
+        anchor.focus({ preventScroll: true });
         anchor.click();
         return true;
       }
