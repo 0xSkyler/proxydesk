@@ -40,9 +40,12 @@ const IPC_CHANNELS = {
   browserCheckAllIps: 'browser:checkAllIps',
   browserRestart: 'browser:restart',
   browserBroadcastSearch: 'browser:broadcastSearch',
+  browserSetKeepAlive: 'browser:setKeepAlive',
+  browserSetKeepAliveAll: 'browser:setKeepAliveAll',
   browserStateChanged: 'browser:stateChanged',
 
   proxyReload: 'proxy:reload',
+  proxyRotateNow: 'proxy:rotateNow',
   proxyGetAll: 'proxy:getAll',
   proxyAssign: 'proxy:assign',
   proxyReplaceFailed: 'proxy:replaceFailed',
@@ -55,6 +58,13 @@ const IPC_CHANNELS = {
   proxyExport: 'proxy:export',
   proxyAssignmentsChanged: 'proxy:assignmentsChanged',
   proxyReloadProgress: 'proxy:reloadProgress',
+
+  automationGetState: 'automation:getState',
+  automationStart: 'automation:start',
+  automationStop: 'automation:stop',
+  automationRunNow: 'automation:runNow',
+  automationStateChanged: 'automation:stateChanged',
+  automationSeoResult: 'automation:seoResult',
 
   settingsGet: 'settings:get',
   settingsUpdate: 'settings:update',
@@ -83,8 +93,10 @@ const api: AppApi = {
     checkIp: (id) => ipcRenderer.invoke(IPC_CHANNELS.browserCheckIp, id),
     checkAllIps: () => ipcRenderer.invoke(IPC_CHANNELS.browserCheckAllIps),
     restart: (id) => ipcRenderer.invoke(IPC_CHANNELS.browserRestart, id),
-    broadcastSearch: (ids, query, matchText) =>
-      ipcRenderer.invoke(IPC_CHANNELS.browserBroadcastSearch, ids, query, matchText),
+    broadcastSearch: (ids, query, targetWebsite) =>
+      ipcRenderer.invoke(IPC_CHANNELS.browserBroadcastSearch, ids, query, targetWebsite),
+    setKeepAlive: (id, enabled) => ipcRenderer.invoke(IPC_CHANNELS.browserSetKeepAlive, id, enabled),
+    setKeepAliveAll: (enabled) => ipcRenderer.invoke(IPC_CHANNELS.browserSetKeepAliveAll, enabled),
     onStateChanged: (cb) => {
       const listener = (_e: Electron.IpcRendererEvent, state: Parameters<typeof cb>[0]) => cb(state);
       ipcRenderer.on(IPC_CHANNELS.browserStateChanged, listener);
@@ -93,6 +105,7 @@ const api: AppApi = {
   },
   proxy: {
     reload: (countryCode) => ipcRenderer.invoke(IPC_CHANNELS.proxyReload, countryCode),
+    rotateNow: (countryCode) => ipcRenderer.invoke(IPC_CHANNELS.proxyRotateNow, countryCode),
     getAll: () => ipcRenderer.invoke(IPC_CHANNELS.proxyGetAll),
     assign: (browserId, proxyId) => ipcRenderer.invoke(IPC_CHANNELS.proxyAssign, browserId, proxyId),
     replaceFailed: (browserId) => ipcRenderer.invoke(IPC_CHANNELS.proxyReplaceFailed, browserId),
@@ -112,6 +125,22 @@ const api: AppApi = {
       const listener = (_e: Electron.IpcRendererEvent, progress: Parameters<typeof cb>[0]) => cb(progress);
       ipcRenderer.on(IPC_CHANNELS.proxyReloadProgress, listener);
       return () => ipcRenderer.removeListener(IPC_CHANNELS.proxyReloadProgress, listener);
+    }
+  },
+  automation: {
+    getState: () => ipcRenderer.invoke(IPC_CHANNELS.automationGetState),
+    start: (config) => ipcRenderer.invoke(IPC_CHANNELS.automationStart, config),
+    stop: () => ipcRenderer.invoke(IPC_CHANNELS.automationStop),
+    runNow: () => ipcRenderer.invoke(IPC_CHANNELS.automationRunNow),
+    onStateChanged: (cb) => {
+      const listener = (_e: Electron.IpcRendererEvent, state: Parameters<typeof cb>[0]) => cb(state);
+      ipcRenderer.on(IPC_CHANNELS.automationStateChanged, listener);
+      return () => ipcRenderer.removeListener(IPC_CHANNELS.automationStateChanged, listener);
+    },
+    onSeoResult: (cb) => {
+      const listener = (_e: Electron.IpcRendererEvent, payload: Parameters<typeof cb>[0]) => cb(payload);
+      ipcRenderer.on(IPC_CHANNELS.automationSeoResult, listener);
+      return () => ipcRenderer.removeListener(IPC_CHANNELS.automationSeoResult, listener);
     }
   },
   settings: {

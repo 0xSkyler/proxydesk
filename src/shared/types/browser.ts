@@ -23,6 +23,9 @@ export interface BrowserState {
   lastIpCheckAt?: string;
   errorMessage?: string;
   crashCount: number;
+  keepAliveEnabled: boolean;
+  keepAliveHops: number;
+  lastKeepAliveAt?: string;
   title?: string;
   faviconUrl?: string;
 }
@@ -46,6 +49,9 @@ export interface BroadcastSearchResult {
   matchedTitle?: string;
   /** How many organic results were scanned before finding a match (or not). */
   resultsScanned?: number;
+  position?: number;
+  resultPage?: number;
+  keepAliveStarted?: boolean;
   error?: string;
   ranAt: string;
 }

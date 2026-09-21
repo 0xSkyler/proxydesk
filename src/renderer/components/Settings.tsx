@@ -77,14 +77,10 @@ export function Settings(): JSX.Element {
             onChange={(e) => void apply({ browser: { ...settings.browser, tileMinHeight: Number(e.target.value) } })}
           />
         </label>
-        <label className="checkbox-label">
-          <input
-            type="checkbox"
-            checked={settings.browser.persistSessions}
-            onChange={(e) => void apply({ browser: { ...settings.browser, persistSessions: e.target.checked } })}
-          />
-          Persist browser sessions
-        </label>
+        <p className="muted" style={{ marginTop: -6, marginBottom: 0 }}>
+          Browser sessions are always temporary. Cookies, cache, local/site storage and prior browsing state are
+          cleared when ProxyDesk closes; persistent browser sessions are disabled.
+        </p>
         <label>
           Start page
           <input
@@ -115,34 +111,57 @@ export function Settings(): JSX.Element {
             checked={settings.browser.keepAliveEnabled}
             onChange={(e) => void apply({ browser: { ...settings.browser, keepAliveEnabled: e.target.checked } })}
           />
-          Keep sessions alive while away (tiny periodic auto-scroll so sites don&rsquo;t treat the tab as idle)
+          Enable enhanced Keep Alive on all browsers
         </label>
-        {settings.browser.keepAliveEnabled && (
-          <label>
-            Keep-alive interval (seconds)
-            <input
-              type="number"
-              min={10}
-              max={3600}
-              value={settings.browser.keepAliveIntervalSec}
-              onChange={(e) =>
-                void apply({ browser: { ...settings.browser, keepAliveIntervalSec: Number(e.target.value) } })
-              }
-            />
-          </label>
-        )}
+        <label>
+          Keep-alive interval (seconds)
+          <input
+            type="number"
+            min={5}
+            max={3600}
+            value={settings.browser.keepAliveIntervalSec}
+            onChange={(e) =>
+              void apply({ browser: { ...settings.browser, keepAliveIntervalSec: Number(e.target.value) } })
+            }
+          />
+        </label>
+        <label>
+          Central Keep Alive content limit (1-1000 pages per browser)
+          <input
+            type="number"
+            min={1}
+            max={1000}
+            value={settings.browser.keepAliveMaxHops}
+            onChange={(e) =>
+              void apply({ browser: { ...settings.browser, keepAliveMaxHops: Number(e.target.value) } })
+            }
+          />
+        </label>
+        <p className="muted" style={{ marginTop: -6, marginBottom: 0 }}>
+          Each page is slowly scrolled from top to bottom and back to top 6-8 times before Keep Alive follows a
+          different same-site content link. The central limit above applies to every browser. Login, account, cart,
+          checkout, payment, download, admin and destructive links are excluded.
+        </p>
+        <label>
+          SEO tracker: maximum Google result pages
+          <input
+            type="number"
+            min={1}
+            max={10}
+            value={settings.browser.seoMaxPages}
+            onChange={(e) =>
+              void apply({ browser: { ...settings.browser, seoMaxPages: Number(e.target.value) } })
+            }
+          />
+        </label>
       </section>
 
       <section>
         <h3>Proxy</h3>
-        <label className="checkbox-label">
-          <input
-            type="checkbox"
-            checked={settings.proxy.autoLoadOnStartup}
-            onChange={(e) => void apply({ proxy: { ...settings.proxy, autoLoadOnStartup: e.target.checked } })}
-          />
-          Auto-load proxies on startup
-        </label>
+        <p className="muted">
+          Proxy lists are session-only. ProxyDesk starts with an empty pool every time; upload/paste your proxy.txt
+          for the current run. Importing a new list replaces the previous runtime pool.
+        </p>
         <label className="checkbox-label">
           <input
             type="checkbox"
@@ -152,9 +171,9 @@ export function Settings(): JSX.Element {
           Auto-replace proxies blocked by Google (CAPTCHA)
         </label>
         <p className="muted">
-          When a browser hits Google&rsquo;s &ldquo;unusual traffic&rdquo; / CAPTCHA page while browsing normally,
-          turning this on swaps in a different proxy and retries the page automatically (up to 3 tries in a row
-          before giving up and leaving it for a manual &ldquo;Change Proxy&rdquo; click).
+          During normal manual browsing, this can swap a failed/blocked proxy and retry up to 3 times. During
+          Autonomous SEO, Google challenge pages are only reported for that cycle; the app waits for the next
+          scheduled rotation instead of immediately changing proxies in response to the challenge.
         </p>
         <label className="checkbox-label">
           <input
@@ -209,23 +228,34 @@ export function Settings(): JSX.Element {
             onChange={(e) => void apply({ proxy: { ...settings.proxy, ipCheckUrl: e.target.value } })}
           />
         </label>
-        <label>
-          Proxy rotation
-          <select
-            value={settings.proxy.rotationInterval}
+        <label className="checkbox-label">
+          <input
+            type="checkbox"
+            checked={settings.proxy.autoRotationEnabled}
             onChange={(e) =>
-              void apply({
-                proxy: { ...settings.proxy, rotationInterval: e.target.value as typeof settings.proxy.rotationInterval }
-              })
+              void apply({ proxy: { ...settings.proxy, autoRotationEnabled: e.target.checked } })
             }
-          >
-            <option value="off">Off</option>
-            <option value="10m">Every 10 minutes</option>
-            <option value="30m">Every 30 minutes</option>
-            <option value="60m">Every 60 minutes</option>
-            <option value="manual">Manual only</option>
-          </select>
+          />
+          Auto-rotate assigned proxies
         </label>
+        {settings.proxy.autoRotationEnabled && (
+          <label>
+            Proxy rotation interval (seconds)
+            <input
+              type="number"
+              min={5}
+              max={86400}
+              value={settings.proxy.rotationIntervalSec}
+              onChange={(e) =>
+                void apply({ proxy: { ...settings.proxy, rotationIntervalSec: Number(e.target.value) } })
+              }
+            />
+          </label>
+        )}
+        <p className="muted">
+          Timed rotation reassigns from the existing proxy pool without running a complete validation sweep on
+          every tick. Values below 5 seconds are clamped to 5 seconds.
+        </p>
       </section>
 
       <section>

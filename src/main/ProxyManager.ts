@@ -1,6 +1,12 @@
 import { EventEmitter } from 'node:events';
 import { promises as fs } from 'node:fs';
-import type { ProxyImportResult, ProxyRecord, ReloadProgress, ReloadProxiesSummary } from '../shared/types/proxy';
+import type {
+  ProxyAssignment,
+  ProxyImportResult,
+  ProxyRecord,
+  ReloadProgress,
+  ReloadProxiesSummary
+} from '../shared/types/proxy';
 import type { SettingsManager } from './SettingsManager';
 import type { StorageManager } from './StorageManager';
 import { dedupeProxies, parseBulkText } from '../proxy/ProxyParser';
@@ -25,9 +31,12 @@ export declare interface ProxyManager {
 // eslint-disable-next-line @typescript-eslint/no-unsafe-declaration-merging -- standard Node EventEmitter typed-events pattern
 export class ProxyManager extends EventEmitter {
   private allProxies = new Map<string, ProxyRecord>();
-  private importedProxies: ProxyRecord[] = [];
   private assignments = new Map<number, ProxyRecord | null>();
   private currentReloadController: AbortController | null = null;
+  private rotationOffset = 0;
+  /** Proxies already consumed by autonomous file rotation in this app session.
+   * They are not eligible again until the current source pool is exhausted. */
+  private automationUsedProxyIds = new Set<string>();
 
   constructor(
     private readonly storage: StorageManager,
@@ -37,23 +46,17 @@ export class ProxyManager extends EventEmitter {
   }
 
   async init(): Promise<void> {
-    const storedProxies = await this.storage.read<ProxyRecord[]>(PROXIES_KEY, []);
-    for (const p of storedProxies) this.allProxies.set(p.id, this.normalizeLoaded(this.decryptCredentials(p)));
-
-    this.importedProxies = (await this.storage.read<ProxyRecord[]>(IMPORTED_KEY, [])).map((p) =>
-      this.normalizeLoaded(p)
-    );
-    for (const p of this.importedProxies) this.allProxies.set(p.id, this.decryptCredentials(p));
-
-    const storedAssignments = await this.storage.read<Array<{ browserId: number; proxyId: string | null }>>(
-      ASSIGNMENTS_KEY,
-      []
-    );
-    for (const a of storedAssignments) {
-      this.assignments.set(a.browserId, a.proxyId ? this.allProxies.get(a.proxyId) ?? null : null);
-    }
-
-    logger.info('proxy', `ProxyManager initialized with ${this.allProxies.size} known proxies.`);
+    // Proxy state is intentionally session-only. Purge any files written by
+    // older builds so a restart always begins with an empty proxy pool.
+    await Promise.all([
+      this.storage.remove(PROXIES_KEY),
+      this.storage.remove(IMPORTED_KEY),
+      this.storage.remove(ASSIGNMENTS_KEY)
+    ]);
+    this.allProxies.clear();
+    this.assignments.clear();
+    this.automationUsedProxyIds.clear();
+    logger.info('proxy', 'ProxyManager initialized with an empty session-only proxy pool.');
   }
 
   getAll(): ProxyRecord[] {
@@ -66,6 +69,12 @@ export class ProxyManager extends EventEmitter {
 
   getAllAssignments(): Map<number, ProxyRecord | null> {
     return this.assignments;
+  }
+
+  /** Starts a fresh autonomous rotation sequence without affecting manual
+   * rotation state. Called when the user starts a new autonomous SEO run. */
+  resetAutomationRotationHistory(): void {
+    this.automationUsedProxyIds.clear();
   }
 
   /**
@@ -134,6 +143,231 @@ export class ProxyManager extends EventEmitter {
       found,
       countryMatched,
       working,
+      assignments
+    };
+    this.emit('assignmentsChanged', summary);
+    return summary;
+  }
+
+  /**
+   * Re-reads a proxy file and validates its contents with bounded
+   * concurrency. Each working proxy is surfaced immediately and assigned to
+   * one browser without waiting for the rest of the batch to finish.
+   *
+   * The selected file replaces the previous in-memory pool for this cycle.
+   * Existing assignments are remembered only to prefer a different proxy
+   * for the same browser when possible.
+   */
+  async validateFileStreaming(
+    filePath: string,
+    browserIds: number[],
+    countryCode: string | null,
+    onAssignment: (assignment: ProxyAssignment, checked: number, total: number) => void,
+    onProgress?: (checked: number, total: number, working: number, assigned: number) => void
+  ): Promise<ReloadProxiesSummary> {
+    this.currentReloadController?.abort();
+    const controller = new AbortController();
+    this.currentReloadController = controller;
+
+    const previousAssignments = new Map(this.assignments);
+    const text = await fs.readFile(filePath, 'utf8');
+    const { proxies } = parseBulkText(text, 'Automated file');
+    const replacement = dedupeProxies(proxies);
+
+    // Keep the autonomous ledger only for proxies that still exist in the
+    // selected source file. If the whole current source pool has already
+    // been consumed, begin a new rotation round immediately.
+    const replacementIds = new Set(replacement.map((proxy) => proxy.id));
+    for (const proxyId of Array.from(this.automationUsedProxyIds)) {
+      if (!replacementIds.has(proxyId)) this.automationUsedProxyIds.delete(proxyId);
+    }
+    if (replacement.length > 0 && replacement.every((proxy) => this.automationUsedProxyIds.has(proxy.id))) {
+      this.automationUsedProxyIds.clear();
+    }
+
+    this.allProxies.clear();
+    this.assignments.clear();
+    for (const proxy of replacement) {
+      this.allProxies.set(proxy.id, { ...proxy, status: 'checking' });
+    }
+
+    const settings = this.settings.get();
+    const candidates = filterByCountry(Array.from(this.allProxies.values()), countryCode);
+    const total = candidates.length;
+    const remaining = new Set(browserIds);
+    // Never share one proxy between active browsers in the same cycle.
+    const cycleUsedProxyIds = new Set<string>();
+    let working = 0;
+    let assigned = 0;
+
+    this.emit('reloadProgress', { checked: 0, total });
+    onProgress?.(0, total, 0, 0);
+
+    const chooseBrowserFor = (proxy: ProxyRecord): number | null => {
+      if (this.automationUsedProxyIds.has(proxy.id) || cycleUsedProxyIds.has(proxy.id)) return null;
+      const ids = Array.from(remaining);
+      if (ids.length === 0) return null;
+      // Prefer moving each browser away from the proxy it had last cycle.
+      const different = ids.find((id) => previousAssignments.get(id)?.id !== proxy.id);
+      return different ?? ids[0] ?? null;
+    };
+
+    const results = await ProxyValidator.validateMany(candidates, {
+      timeoutMs: settings.proxy.validationTimeoutMs,
+      ipCheckUrl: settings.proxy.ipCheckUrl,
+      maxConcurrent: settings.proxy.maxConcurrentChecks,
+      signal: controller.signal,
+      onResult: (result, checked, resultTotal) => {
+        if (controller.signal.aborted) return;
+        const proxy = this.allProxies.get(result.proxyId);
+        if (!proxy) return;
+
+        proxy.status = result.status;
+        proxy.latencyMs = result.latencyMs;
+        proxy.lastChecked = result.checkedAt;
+        if (result.status === 'working') {
+          proxy.successCount += 1;
+          working += 1;
+        } else {
+          proxy.failureCount += 1;
+        }
+        proxy.score = scoreProxy(proxy);
+        this.allProxies.set(proxy.id, proxy);
+
+        if (result.status === 'working' && !cycleUsedProxyIds.has(proxy.id)) {
+          const browserId = chooseBrowserFor(proxy);
+          if (browserId != null) {
+            this.assignments.set(browserId, proxy);
+            remaining.delete(browserId);
+            cycleUsedProxyIds.add(proxy.id);
+            this.automationUsedProxyIds.add(proxy.id);
+            assigned += 1;
+
+            const assignment: ProxyAssignment = { browserId, proxy };
+            onAssignment(assignment, checked, resultTotal);
+
+            this.emit('assignmentsChanged', {
+              found: replacement.length,
+              countryMatched: total,
+              working,
+              assignments: browserIds.map((id) => ({
+                browserId: id,
+                proxy: this.assignments.get(id) ?? null
+              }))
+            });
+          }
+        }
+
+        this.emit('reloadProgress', { checked, total: resultTotal });
+        onProgress?.(checked, resultTotal, working, assigned);
+      }
+    });
+
+    // If another reload/automation cycle superseded this one, do not let
+    // late abort completions overwrite the newer cycle's in-memory pool.
+    if (controller.signal.aborted || this.currentReloadController !== controller) {
+      return {
+        found: replacement.length,
+        countryMatched: total,
+        working,
+        assignments: browserIds.map((browserId) => ({
+          browserId,
+          proxy: this.assignments.get(browserId) ?? null
+        }))
+      };
+    }
+
+    // Keep the final state from every completed validation result even if no
+    // browser slot was left for that proxy.
+    for (const result of results) {
+      const proxy = this.allProxies.get(result.proxyId);
+      if (!proxy) continue;
+      proxy.status = result.status;
+      proxy.latencyMs = result.latencyMs;
+      proxy.lastChecked = result.checkedAt;
+      proxy.score = scoreProxy(proxy);
+      this.allProxies.set(proxy.id, proxy);
+    }
+
+    // If proxies that were unused in earlier cycles all turned out dead, the
+    // final live set may consist entirely of previously-used proxies. Only
+    // after the complete validation pass proves that condition do we begin a
+    // new round. Even then, a proxy remains exclusive to one browser in this
+    // cycle; extra browsers stay unassigned rather than sharing an endpoint.
+    const live = Array.from(this.allProxies.values()).filter((proxy) => proxy.status === 'working');
+    if (
+      !controller.signal.aborted &&
+      remaining.size > 0 &&
+      live.length > 0 &&
+      live.every((proxy) => this.automationUsedProxyIds.has(proxy.id))
+    ) {
+      this.automationUsedProxyIds.clear();
+      for (const browserId of Array.from(remaining)) {
+        const eligible = live.filter((proxy) => !cycleUsedProxyIds.has(proxy.id));
+        if (eligible.length === 0) break;
+        const previousId = previousAssignments.get(browserId)?.id;
+        const proxy = eligible.find((candidate) => candidate.id !== previousId) ?? eligible[0];
+        this.assignments.set(browserId, proxy);
+        remaining.delete(browserId);
+        cycleUsedProxyIds.add(proxy.id);
+        this.automationUsedProxyIds.add(proxy.id);
+        assigned += 1;
+        onAssignment({ browserId, proxy }, total, total);
+      }
+    }
+
+    const summary: ReloadProxiesSummary = {
+      found: replacement.length,
+      countryMatched: total,
+      working,
+      assignments: browserIds.map((browserId) => ({
+        browserId,
+        proxy: this.assignments.get(browserId) ?? null
+      }))
+    };
+
+    this.emit('assignmentsChanged', summary);
+    onProgress?.(total, total, working, assigned);
+    if (this.currentReloadController === controller) this.currentReloadController = null;
+    return summary;
+  }
+
+  cancelCurrentValidation(): void {
+    this.currentReloadController?.abort();
+    this.currentReloadController = null;
+  }
+
+  /**
+   * Reassigns from the already-known proxy pool without revalidating the
+   * complete list on every timer tick. Previously-confirmed working proxies
+   * are preferred when validation is enabled.
+   */
+  async rotate(browserIds: number[], countryCode: string | null): Promise<ReloadProxiesSummary> {
+    const settings = this.settings.get();
+    const known = dedupeProxies(Array.from(this.allProxies.values()));
+    const countryFiltered = filterByCountry(known, countryCode).filter((p) => p.status !== 'dead');
+    const confirmed = countryFiltered.filter((p) => p.status === 'working');
+    const candidates = settings.proxy.validationEnabled && confirmed.length > 0 ? confirmed : countryFiltered;
+
+    const offset = candidates.length === 0 ? 0 : this.rotationOffset % candidates.length;
+    const assignments = assignProxies(candidates, {
+      browserIds,
+      allowProxyReuse: settings.proxy.allowProxyReuse,
+      currentAssignments: this.assignments,
+      keepExisting: false,
+      startOffset: offset
+    });
+
+    this.rotationOffset =
+      candidates.length === 0 ? 0 : (offset + Math.max(1, browserIds.length)) % candidates.length;
+
+    for (const assignment of assignments) this.assignments.set(assignment.browserId, assignment.proxy);
+    await this.persist();
+
+    const summary: ReloadProxiesSummary = {
+      found: known.length,
+      countryMatched: countryFiltered.length,
+      working: confirmed.length,
       assignments
     };
     this.emit('assignmentsChanged', summary);
@@ -301,17 +535,21 @@ export class ProxyManager extends EventEmitter {
 
   async importText(text: string): Promise<ProxyImportResult> {
     const { proxies, invalidLines } = parseBulkText(text, 'Imported');
-    const merged = dedupeProxies([...this.importedProxies, ...proxies]);
-    this.importedProxies = merged;
-    for (const p of merged) this.allProxies.set(p.id, p);
-    await this.persist();
+    const replacement = dedupeProxies(proxies);
+
+    // Every import replaces the current runtime pool. This guarantees that
+    // only proxies from the most recently uploaded/pasted list are eligible.
+    this.allProxies.clear();
+    this.assignments.clear();
+    this.automationUsedProxyIds.clear();
+    for (const proxy of replacement) this.allProxies.set(proxy.id, proxy);
 
     return {
       imported: proxies.length + invalidLines.length,
-      valid: proxies.length,
+      valid: replacement.length,
       invalid: invalidLines.length,
       invalidLines,
-      proxies
+      proxies: replacement
     };
   }
 
@@ -336,37 +574,8 @@ export class ProxyManager extends EventEmitter {
   }
 
   private async persist(): Promise<void> {
-    const encrypted = Array.from(this.allProxies.values()).map((p) => this.encryptCredentials(p));
-    await this.storage.write(PROXIES_KEY, encrypted);
-    await this.storage.write(IMPORTED_KEY, this.importedProxies.map((p) => this.encryptCredentials(p)));
-    await this.storage.write(
-      ASSIGNMENTS_KEY,
-      Array.from(this.assignments.entries()).map(([browserId, proxy]) => ({
-        browserId,
-        proxyId: proxy?.id ?? null
-      }))
-    );
-  }
-
-  private encryptCredentials(proxy: ProxyRecord): ProxyRecord {
-    if (!proxy.password) return proxy;
-    return { ...proxy, password: this.storage.encryptSecret(proxy.password) };
-  }
-
-  /** Records saved before the Google-trust-check feature existed won't have
-   * `googleStatus` in their persisted JSON — fill it in on load so the UI
-   * and scorer never see `undefined` there. */
-  private normalizeLoaded(proxy: ProxyRecord): ProxyRecord {
-    return proxy.googleStatus ? proxy : { ...proxy, googleStatus: 'unknown' };
-  }
-
-  private decryptCredentials(proxy: ProxyRecord): ProxyRecord {
-    if (!proxy.password) return proxy;
-    try {
-      return { ...proxy, password: this.storage.decryptSecret(proxy.password) };
-    } catch {
-      return { ...proxy, password: undefined };
-    }
+    // Deliberately no-op: proxy pool, credentials, assignments and usage
+    // history live only in memory for the lifetime of this app process.
   }
 }
 

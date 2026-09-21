@@ -6,6 +6,8 @@ export interface AssignOptions {
   allowProxyReuse: boolean;
   /** Existing assignments to prefer keeping stable when their proxy is still healthy. */
   currentAssignments?: Map<number, ProxyRecord | null>;
+  keepExisting?: boolean;
+  startOffset?: number;
 }
 
 /**
@@ -27,7 +29,13 @@ export interface AssignOptions {
  */
 export function assignProxies(candidates: ProxyRecord[], options: AssignOptions): ProxyAssignment[] {
   const healthy = candidates.filter((p) => p.status !== 'dead');
-  const ranked = rankProxies(healthy);
+  const rankedBase = rankProxies(healthy);
+  const offset =
+    rankedBase.length === 0
+      ? 0
+      : ((options.startOffset ?? 0) % rankedBase.length + rankedBase.length) % rankedBase.length;
+  const ranked =
+    offset === 0 ? rankedBase : [...rankedBase.slice(offset), ...rankedBase.slice(0, offset)];
   const usedIds = new Set<string>();
   const assignments: ProxyAssignment[] = [];
   const current = options.currentAssignments ?? new Map();
@@ -37,7 +45,12 @@ export function assignProxies(candidates: ProxyRecord[], options: AssignOptions)
 
   for (const browserId of options.browserIds) {
     const existing = current.get(browserId);
-    if (existing && existing.status === 'working' && ranked.some((p) => p.id === existing.id)) {
+    if (
+      options.keepExisting !== false &&
+      existing &&
+      existing.status === 'working' &&
+      ranked.some((p) => p.id === existing.id)
+    ) {
       assignments.push({ browserId, proxy: existing });
       usedIds.add(existing.id);
       const subnet = subnetOf(existing.host);

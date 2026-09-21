@@ -4,10 +4,10 @@ import { BrowserManager } from './BrowserManager';
 import { ProxyManager } from './ProxyManager';
 import { SettingsManager } from './SettingsManager';
 import { StorageManager } from './StorageManager';
+import { SeoAutomationManager } from './SeoAutomationManager';
 import { registerIpc } from './ipc/registerIpc';
 import { logger } from './Logger';
 import { BROWSER_IDS } from '../shared/types/browser';
-import type { ProxyRotationInterval } from '../shared/types/settings';
 
 const isDev = process.env.NODE_ENV === 'development' || !app.isPackaged;
 
@@ -16,6 +16,7 @@ let browserManager: BrowserManager;
 let proxyManager: ProxyManager;
 let settingsManager: SettingsManager;
 let storageManager: StorageManager;
+let automationManager: SeoAutomationManager;
 let rotationTimer: NodeJS.Timeout | null = null;
 
 // TOOLBAR_HEIGHT/SIDEBAR values mirror the renderer's CSS layout constants
@@ -78,6 +79,15 @@ async function bootstrap(): Promise<void> {
   await proxyManager.init();
 
   browserManager = new BrowserManager();
+  automationManager = new SeoAutomationManager(
+    proxyManager,
+    browserManager,
+    settingsManager,
+    () => BROWSER_IDS.slice(0, settingsManager.get().browser.browserCount)
+  );
+  // Remove browser cookies/cache/site storage left by any older persistent
+  // build for every possible workspace id before this run starts.
+  await browserManager.purgeLegacyPersistentSessions(BROWSER_IDS);
 
   await createWindow();
 
@@ -85,6 +95,7 @@ async function bootstrap(): Promise<void> {
     browserManager,
     proxyManager,
     settingsManager,
+    automationManager,
     getBrowserIds: () => BROWSER_IDS.slice(0, settingsManager.get().browser.browserCount)
   });
 
@@ -98,6 +109,7 @@ async function bootstrap(): Promise<void> {
       userAgent: settings.browser.userAgent,
       onGoogleBlocked: (browserId, continueUrl) => void handleGoogleBlocked(browserId, continueUrl)
     });
+    if (settings.browser.keepAliveEnabled) browserManager.setBrowserKeepAlive(id, true, true);
   }
 
   if (settings.proxy.autoLoadOnStartup) {
@@ -116,16 +128,25 @@ async function bootstrap(): Promise<void> {
     }
   }
 
-  browserManager.setKeepAlive(settings.browser.keepAliveEnabled, settings.browser.keepAliveIntervalSec * 1000);
+  browserManager.configureKeepAlive(
+    settings.browser.keepAliveIntervalSec * 1000,
+    settings.browser.keepAliveMaxHops,
+    settings.browser.keepAliveFollowLinks
+  );
+  if (settings.browser.keepAliveEnabled) browserManager.setKeepAliveAll(true, true);
+  let globalKeepAliveEnabled = settings.browser.keepAliveEnabled;
   scheduleProxyRotation();
 
-  // Both the keep-alive nudge timer and the proxy-rotation timer only read
-  // settings at the moment they're (re)armed, so a live change in Settings
-  // needs to re-arm them — otherwise flipping "Keep sessions alive" on, or
-  // switching the rotation interval, would silently do nothing until a
-  // restart.
   settingsManager.onChange((updated) => {
-    browserManager.setKeepAlive(updated.browser.keepAliveEnabled, updated.browser.keepAliveIntervalSec * 1000);
+    browserManager.configureKeepAlive(
+      updated.browser.keepAliveIntervalSec * 1000,
+      updated.browser.keepAliveMaxHops,
+      updated.browser.keepAliveFollowLinks
+    );
+    if (updated.browser.keepAliveEnabled !== globalKeepAliveEnabled) {
+      globalKeepAliveEnabled = updated.browser.keepAliveEnabled;
+      browserManager.setKeepAliveAll(globalKeepAliveEnabled, globalKeepAliveEnabled);
+    }
     scheduleProxyRotation();
     void syncBrowserCount(updated);
   });
@@ -133,28 +154,8 @@ async function bootstrap(): Promise<void> {
   logger.info('application', 'ProxyDesk ready.');
 }
 
-/** Milliseconds for each rotation choice, or null for 'off'/'manual' (no
- * automatic timer — the user triggers reassignment by hand via the toolbar). */
-function rotationIntervalMs(interval: ProxyRotationInterval): number | null {
-  switch (interval) {
-    case '10m':
-      return 10 * 60 * 1000;
-    case '30m':
-      return 30 * 60 * 1000;
-    case '60m':
-      return 60 * 60 * 1000;
-    case 'off':
-    case 'manual':
-    default:
-      return null;
-  }
-}
-
 /**
- * (Re-)arms the automatic proxy-rotation timer from the current setting.
- * Always clears any previous timer first, so calling this again after a
- * settings change (or at startup) never stacks multiple timers running the
- * same rotation concurrently.
+ * Re-arms second-based proxy rotation from the existing proxy pool.
  */
 function scheduleProxyRotation(): void {
   if (rotationTimer) {
@@ -162,32 +163,26 @@ function scheduleProxyRotation(): void {
     rotationTimer = null;
   }
 
-  const ms = rotationIntervalMs(settingsManager.get().proxy.rotationInterval);
-  if (ms == null) return;
+  const proxySettings = settingsManager.get().proxy;
+  if (!proxySettings.autoRotationEnabled || automationManager?.isRunning()) return;
 
-  rotationTimer = setInterval(() => void runProxyRotation(), ms);
-  logger.info('application', `Automatic proxy rotation armed: every ${ms / 60000} minute(s).`);
+  const seconds = Math.max(5, Math.min(86400, Math.floor(proxySettings.rotationIntervalSec || 60)));
+  rotationTimer = setInterval(() => void runProxyRotation(), seconds * 1000);
+  logger.info('application', `Automatic proxy rotation armed: every ${seconds} second(s).`);
 }
 
-/**
- * One rotation cycle: validate the known proxy pool, assign fresh ones to
- * every browser, and apply each assignment to that browser's real session
- * (which also reloads it — see BrowserManager.assignProxy) so switching off
- * a poorly-performing public proxy actually takes effect, not just in the
- * UI's bookkeeping.
- */
 async function runProxyRotation(): Promise<void> {
+  if (automationManager?.isRunning()) return;
   const settings = settingsManager.get();
   const browserIds = BROWSER_IDS.slice(0, settings.browser.browserCount);
   try {
-    const summary = await proxyManager.reload(browserIds, settings.proxy.preferredCountryCode);
+    const summary = await proxyManager.rotate(browserIds, settings.proxy.preferredCountryCode);
     for (const assignment of summary.assignments) {
       await browserManager.assignProxy(assignment.browserId, assignment.proxy);
     }
     logger.info(
       'proxy',
-      `Automatic proxy rotation complete: ${summary.working}/${summary.found} working, ` +
-        `${summary.assignments.filter((a) => a.proxy).length}/${browserIds.length} browsers reassigned.`
+      `Automatic proxy rotation complete: ${summary.assignments.filter((a) => a.proxy).length}/${browserIds.length} browsers reassigned.`
     );
   } catch (err) {
     logger.warn('proxy', `Automatic proxy rotation failed: ${(err as Error).message}. Will retry on the next cycle.`);
@@ -245,18 +240,31 @@ async function syncBrowserCount(settings: ReturnType<SettingsManager['get']>): P
  */
 async function handleGoogleBlocked(browserId: number, continueUrl: string): Promise<void> {
   const settings = settingsManager.get();
-  if (!settings.proxy.autoReplaceFailed) return;
 
   try {
     await proxyManager.markGoogleBlocked(browserId);
+
+    // During autonomous SEO mode, a Google challenge ends that browser's
+    // current SEO attempt. We do not immediately swap proxies in response
+    // to the challenge; the normal user-configured rotation cycle will
+    // choose the next validated proxy on schedule.
+    if (automationManager?.isRunning()) {
+      browserManager.setBrowserKeepAlive(browserId, false, false);
+      logger.warn(
+        'proxy',
+        `Browser ${browserId}: Google challenge observed during autonomous SEO. Waiting for the next scheduled rotation cycle.`
+      );
+      void continueUrl;
+      return;
+    }
+
+    if (!settings.proxy.autoReplaceFailed) return;
+
     const newProxy = await proxyManager.replaceFailed(browserId);
     if (!newProxy) {
       logger.warn('proxy', `Browser ${browserId}: no alternative proxy available after a Google CAPTCHA block.`);
       return;
     }
-    // assignProxy() reloads whatever page the browser is currently on —
-    // that's the CAPTCHA interstitial itself right now — so follow it with
-    // an explicit navigate() back to the page that was actually wanted.
     await browserManager.assignProxy(browserId, newProxy);
     await browserManager.navigate(browserId, continueUrl);
     logger.info(
@@ -264,7 +272,7 @@ async function handleGoogleBlocked(browserId: number, continueUrl: string): Prom
       `Browser ${browserId}: swapped to ${newProxy.host}:${newProxy.port} after a Google CAPTCHA block and retried.`
     );
   } catch (err) {
-    logger.warn('proxy', `Browser ${browserId}: failed to auto-recover from a Google CAPTCHA block: ${(err as Error).message}`);
+    logger.warn('proxy', `Browser ${browserId}: failed to handle a Google CAPTCHA block: ${(err as Error).message}`);
   }
 }
 
@@ -289,6 +297,7 @@ app.on('window-all-closed', () => {
 
 app.on('before-quit', () => {
   if (rotationTimer) clearInterval(rotationTimer);
+  automationManager?.stop();
   void browserManager?.destroyAll();
 });
 

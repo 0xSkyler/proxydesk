@@ -241,6 +241,12 @@ export function BrowserPanel({ id, compact = false }: Props): JSX.Element {
             : '—'}
         </span>
         <span>Latency: {browser.proxy?.latencyMs != null ? `${browser.proxy.latencyMs}ms` : '—'}</span>
+        <button
+          className={browser.keepAliveEnabled ? 'btn-primary' : ''}
+          onClick={() => void window.app.browser.setKeepAlive(id, !browser.keepAliveEnabled)}
+        >
+          {browser.keepAliveEnabled ? `Keep Alive · ${browser.keepAliveHops} hops` : 'Keep Alive'}
+        </button>
         <button onClick={() => void window.app.proxy.replaceFailed(id)}>Change Proxy</button>
       </footer>
     </section>

@@ -5,12 +5,14 @@ import type { BrowserBounds } from '../../shared/types/browser';
 import type { BrowserManager } from '../BrowserManager';
 import type { ProxyManager } from '../ProxyManager';
 import type { SettingsManager } from '../SettingsManager';
+import type { SeoAutomationManager } from '../SeoAutomationManager';
 import { logger } from '../Logger';
 
 export interface IpcDeps {
   browserManager: BrowserManager;
   proxyManager: ProxyManager;
   settingsManager: SettingsManager;
+  automationManager: SeoAutomationManager;
   getBrowserIds: () => number[];
 }
 
@@ -22,7 +24,7 @@ export interface IpcDeps {
  * request/response and event channels.
  */
 export function registerIpc(deps: IpcDeps): void {
-  const { browserManager, proxyManager, settingsManager, getBrowserIds } = deps;
+  const { browserManager, proxyManager, settingsManager, automationManager, getBrowserIds } = deps;
 
   ipcMain.handle(IPC_CHANNELS.browserGetAll, () => browserManager.getAll());
   ipcMain.handle(IPC_CHANNELS.browserNavigate, (_e, id: number, url: string) => browserManager.navigate(id, url));
@@ -56,12 +58,25 @@ export function registerIpc(deps: IpcDeps): void {
     );
   });
 
-  ipcMain.handle(IPC_CHANNELS.browserBroadcastSearch, async (_e, ids: number[], query: string, matchText: string) => {
-    const targets = ids.length > 0 ? ids : getBrowserIds();
-    return Promise.all(targets.map((id) => browserManager.broadcastSearch(id, query, matchText)));
-  });
+  ipcMain.handle(
+    IPC_CHANNELS.browserBroadcastSearch,
+    async (_e, ids: number[], query: string, targetWebsite: string) => {
+      const targets = ids.length > 0 ? ids : getBrowserIds();
+      const maxPages = settingsManager.get().browser.seoMaxPages;
+      return Promise.all(targets.map((id) => browserManager.broadcastSearch(id, query, targetWebsite, maxPages)));
+    }
+  );
+  ipcMain.handle(IPC_CHANNELS.browserSetKeepAlive, (_e, id: number, enabled: boolean) =>
+    browserManager.setBrowserKeepAlive(id, enabled, enabled)
+  );
+  ipcMain.handle(IPC_CHANNELS.browserSetKeepAliveAll, (_e, enabled: boolean) =>
+    browserManager.setKeepAliveAll(enabled, enabled)
+  );
 
   ipcMain.handle(IPC_CHANNELS.proxyReload, async (_e, countryCode: string | null) => {
+    if (automationManager.isRunning()) {
+      throw new Error('Stop Autonomous SEO before running a manual proxy assignment.');
+    }
     const summary = await proxyManager.reload(getBrowserIds(), countryCode);
     // reload() only updates ProxyManager's own bookkeeping — it does not
     // touch each browser's actual Electron session. Without this loop, the
@@ -74,11 +89,22 @@ export function registerIpc(deps: IpcDeps): void {
     }
     return summary;
   });
+  ipcMain.handle(IPC_CHANNELS.proxyRotateNow, async (_e, countryCode: string | null) => {
+    if (automationManager.isRunning()) {
+      throw new Error('Use Run Cycle Now or stop Autonomous SEO before manual rotation.');
+    }
+    const summary = await proxyManager.rotate(getBrowserIds(), countryCode);
+    for (const assignment of summary.assignments) {
+      await browserManager.assignProxy(assignment.browserId, assignment.proxy);
+    }
+    return summary;
+  });
   ipcMain.handle(IPC_CHANNELS.proxyGetAll, () => proxyManager.getAll());
   ipcMain.handle(IPC_CHANNELS.proxyAssign, async (_e, browserId: number, proxyId: string | null) => {
     await proxyManager.assign(browserId, proxyId);
-    const proxy = proxyId ? proxyManager.getAll().find((p) => p.id === proxyId) ?? null : null;
-    await browserManager.assignProxy(browserId, proxy);
+    // Use the in-memory assignment rather than the redacted list so
+    // authenticated proxies retain their real credentials in the session.
+    await browserManager.assignProxy(browserId, proxyManager.getAssignment(browserId));
   });
   ipcMain.handle(IPC_CHANNELS.proxyReplaceFailed, async (_e, browserId: number) => {
     const proxy = await proxyManager.replaceFailed(browserId);
@@ -89,9 +115,30 @@ export function registerIpc(deps: IpcDeps): void {
   ipcMain.handle(IPC_CHANNELS.proxyValidateAll, () => proxyManager.validateAll());
   ipcMain.handle(IPC_CHANNELS.proxyCheckGoogleTrust, (_e, proxyId: string) => proxyManager.checkGoogleTrustFor(proxyId));
   ipcMain.handle(IPC_CHANNELS.proxyCheckGoogleTrustForWorking, () => proxyManager.checkGoogleTrustForWorking());
-  ipcMain.handle(IPC_CHANNELS.proxyImportText, (_e, text: string) => proxyManager.importText(text));
-  ipcMain.handle(IPC_CHANNELS.proxyImportFile, (_e, filePath: string) => proxyManager.importFile(filePath));
+  ipcMain.handle(IPC_CHANNELS.proxyImportText, async (_e, text: string) => {
+    if (automationManager.isRunning()) {
+      throw new Error('Stop Autonomous SEO before replacing the manual proxy pool.');
+    }
+    const result = await proxyManager.importText(text);
+    // A new import replaces the old runtime pool, so stop using any proxy
+    // from the previous list immediately.
+    for (const id of getBrowserIds()) await browserManager.assignProxy(id, null);
+    return result;
+  });
+  ipcMain.handle(IPC_CHANNELS.proxyImportFile, async (_e, filePath: string) => {
+    if (automationManager.isRunning()) {
+      throw new Error('Stop Autonomous SEO before replacing the manual proxy pool.');
+    }
+    const result = await proxyManager.importFile(filePath);
+    for (const id of getBrowserIds()) await browserManager.assignProxy(id, null);
+    return result;
+  });
   ipcMain.handle(IPC_CHANNELS.proxyExport, (_e, format: 'txt' | 'csv' | 'json') => proxyManager.exportProxies(format));
+
+  ipcMain.handle(IPC_CHANNELS.automationGetState, () => automationManager.getState());
+  ipcMain.handle(IPC_CHANNELS.automationStart, (_e, config) => automationManager.start(config));
+  ipcMain.handle(IPC_CHANNELS.automationStop, () => automationManager.stop());
+  ipcMain.handle(IPC_CHANNELS.automationRunNow, () => automationManager.runNow());
 
   ipcMain.handle(IPC_CHANNELS.settingsGet, () => settingsManager.get());
   ipcMain.handle(IPC_CHANNELS.settingsUpdate, (_e, partial) => settingsManager.update(partial));
@@ -138,6 +185,18 @@ export function registerIpc(deps: IpcDeps): void {
   proxyManager.on('reloadProgress', (progress) => {
     for (const win of BrowserWindow.getAllWindows()) {
       win.webContents.send(IPC_CHANNELS.proxyReloadProgress, progress);
+    }
+  });
+
+  automationManager.on('stateChanged', (state) => {
+    for (const win of BrowserWindow.getAllWindows()) {
+      win.webContents.send(IPC_CHANNELS.automationStateChanged, state);
+    }
+  });
+
+  automationManager.on('seoResult', (payload) => {
+    for (const win of BrowserWindow.getAllWindows()) {
+      win.webContents.send(IPC_CHANNELS.automationSeoResult, payload);
     }
   });
 }

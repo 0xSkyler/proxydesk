@@ -3,6 +3,7 @@ import { app, BrowserView, BrowserWindow, clipboard, session, type Session } fro
 import type { BroadcastSearchResult, BrowserBounds, BrowserState } from '../shared/types/browser';
 import type { ProxyRecord } from '../shared/types/proxy';
 import { EPHEMERAL_PARTITION_PREFIX, PARTITION_PREFIX } from '../shared/constants';
+import { buildGoogleSearchUrl, hostMatchesTarget, normalizeTargetHost, resultTextMentionsHost } from '../shared/seo';
 import { logger } from './Logger';
 
 /**
@@ -80,6 +81,11 @@ interface ManagedBrowser {
   /** Consecutive Google-CAPTCHA hits since the last successful (non-block)
    * navigation or explicit navigate() call — see MAX_GOOGLE_BLOCK_RETRIES. */
   googleBlockRetries: number;
+  keepAliveEnabled: boolean;
+  keepAliveHops: number;
+  keepAliveNextAt: number;
+  keepAliveBusy: boolean;
+  keepAliveVisited: Set<string>;
 }
 
 /**
@@ -116,6 +122,9 @@ export class BrowserManager extends EventEmitter {
   private activeId: number | null = null;
   private globalLoginHandlerInstalled = false;
   private keepAliveTimer: NodeJS.Timeout | null = null;
+  private keepAliveIntervalMs = 60_000;
+  private keepAliveMaxHops = 25;
+  private keepAliveFollowLinks = true;
 
   attachWindow(window: BrowserWindow): void {
     this.window = window;
@@ -148,12 +157,29 @@ export class BrowserManager extends EventEmitter {
     });
   }
 
-  private partitionFor(id: number, persist: boolean): string {
-    return persist ? `${PARTITION_PREFIX}${id}` : `${EPHEMERAL_PARTITION_PREFIX}${id}-${process.pid}`;
+  private partitionFor(id: number, _persist: boolean): string {
+    // Browser site data is always session-only. A new process gets a fresh
+    // in-memory partition regardless of the legacy persistSessions setting.
+    return `${EPHEMERAL_PARTITION_PREFIX}${id}-${process.pid}`;
+  }
+
+  private async clearLegacyPersistentPartition(id: number): Promise<void> {
+    const legacy = session.fromPartition(`${PARTITION_PREFIX}${id}`, { cache: true });
+    await Promise.allSettled([legacy.clearStorageData(), legacy.clearCache()]);
+  }
+
+  async purgeLegacyPersistentSessions(ids: number[]): Promise<void> {
+    for (const id of ids) {
+      await this.clearLegacyPersistentPartition(id);
+    }
   }
 
   async createBrowser(id: number, options: BrowserManagerOptions): Promise<void> {
     if (this.browsers.has(id)) return;
+
+    // Remove cookies/cache/local storage left by older persistent builds
+    // before creating this run's in-memory browser.
+    await this.clearLegacyPersistentPartition(id);
 
     const partition = this.partitionFor(id, options.persistSessions);
     const ses = session.fromPartition(partition, { cache: true });
@@ -178,10 +204,24 @@ export class BrowserManager extends EventEmitter {
       canGoForward: false,
       proxy: null,
       connectionStatus: 'idle',
-      crashCount: 0
+      crashCount: 0,
+      keepAliveEnabled: false,
+      keepAliveHops: 0
     };
 
-    const managed: ManagedBrowser = { id, view, session: ses, state, restartAttempts: 0, googleBlockRetries: 0 };
+    const managed: ManagedBrowser = {
+      id,
+      view,
+      session: ses,
+      state,
+      restartAttempts: 0,
+      googleBlockRetries: 0,
+      keepAliveEnabled: false,
+      keepAliveHops: 0,
+      keepAliveNextAt: Date.now() + this.keepAliveIntervalMs,
+      keepAliveBusy: false,
+      keepAliveVisited: new Set<string>()
+    };
     this.browsers.set(id, managed);
     this.wireEvents(managed, options);
 
@@ -454,61 +494,345 @@ export class BrowserManager extends EventEmitter {
    * results — both are reported back as a distinct status rather than
    * silently failing or guessing.
    */
-  async broadcastSearch(id: number, query: string, matchText: string): Promise<BroadcastSearchResult> {
+  async broadcastSearch(
+    id: number,
+    query: string,
+    targetWebsite: string,
+    maxPages = 5
+  ): Promise<BroadcastSearchResult> {
     const managed = this.get(id);
     const wc = managed.view.webContents;
-    const searchUrl = `https://www.google.com/search?q=${encodeURIComponent(query)}&num=20&hl=en`;
     const ranAt = new Date().toISOString();
+    const targetHost = normalizeTargetHost(targetWebsite);
 
-    try {
-      await wc.loadURL(searchUrl);
-    } catch (err) {
-      return { browserId: id, status: 'error', error: `Failed to load search page: ${(err as Error).message}`, ranAt };
+    if (!targetHost) {
+      return { browserId: id, status: 'error', error: 'Enter a valid target website or domain.', ranAt };
     }
 
-    // loadURL's promise resolves on navigation commit, not on the results
-    // actually being painted — give the page a moment to render before
-    // reading its DOM.
-    await delay(1500);
+    const pagesToScan = Math.max(1, Math.min(10, Math.floor(maxPages || 1)));
+    let totalScanned = 0;
+    let lastSearchUrl = '';
 
-    let extracted: ExtractedSearchPage;
-    try {
-      extracted = (await wc.executeJavaScript(EXTRACT_GOOGLE_RESULTS_SCRIPT)) as ExtractedSearchPage;
-    } catch (err) {
-      return { browserId: id, status: 'error', error: `Failed to read search results: ${(err as Error).message}`, ranAt };
-    }
+    for (let pageIndex = 0; pageIndex < pagesToScan; pageIndex += 1) {
+      const searchUrl = buildGoogleSearchUrl(query, pageIndex);
+      lastSearchUrl = searchUrl;
 
-    if (extracted.blocked) {
-      return { browserId: id, status: 'blocked', landedUrl: wc.getURL(), ranAt };
-    }
+      // IMPORTANT: do not await loadURL here. Electron resolves loadURL only
+      // after navigation finishes, but Google results can already be visible
+      // and clickable long before images/scripts/other resources finish.
+      //
+      // Electron also queues executeJavaScript while a navigation is still
+      // loading. With slow proxies that left ProxyDesk stuck even though the
+      // organic result was visibly painted. Watch DOM readiness instead and
+      // deliberately stop the remaining Google resource load after a very
+      // short paint grace. That releases executeJavaScript immediately.
+      let navigationErrorMessage: string | null = null;
+      let googleDomReady = false;
+      let googleLoadStopped = false;
+      let stopGoogleTimer: NodeJS.Timeout | null = null;
 
-    const results = extracted.results ?? [];
-    const needle = matchText.trim().toLowerCase();
-    const match = needle
-      ? results.find((r) => r.title.toLowerCase().includes(needle) || r.text.toLowerCase().includes(needle))
-      : results[0];
+      const onGoogleDomReady = () => {
+        if (!isGoogleSearchResultsUrl(wc.getURL())) return;
+        googleDomReady = true;
+        if (stopGoogleTimer) clearTimeout(stopGoogleTimer);
+        stopGoogleTimer = setTimeout(() => {
+          stopGoogleTimer = null;
+          if (!isGoogleSearchResultsUrl(wc.getURL())) return;
+          if (wc.isLoading()) wc.stop();
+          googleLoadStopped = true;
+        }, 180);
+      };
 
-    if (!match) {
-      return { browserId: id, status: 'no-match', landedUrl: wc.getURL(), resultsScanned: results.length, ranAt };
-    }
+      wc.on('dom-ready', onGoogleDomReady);
 
-    try {
-      await wc.loadURL(match.url);
-    } catch (err) {
+      void wc.loadURL(searchUrl).catch((err) => {
+        const message = (err as Error).message || String(err);
+        // Clicking a result while Google is still loading intentionally
+        // aborts the original search navigation. That is a success path.
+        if (!/ERR_ABORTED|-3/i.test(message)) navigationErrorMessage = message;
+      });
+
+      const scanDeadline = Date.now() + 12_000;
+      let latestScan: GoogleResultScan = { blocked: false, ready: false, resultsScanned: 0 };
+      let pageMaxScanned = 0;
+      let googleCommitted = false;
+      let googleCommittedAt: number | null = null;
+      let autoClickInstalled = false;
+      let autoClickTriggered = false;
+
+      while (Date.now() < scanDeadline) {
+        const currentUrl = wc.getURL();
+
+        // The URL commits before the full page finishes loading. As soon as
+        // that happens we can inspect Google's progressively-rendered DOM.
+        if (extractGoogleBlockContinueUrl(currentUrl)) {
+          return {
+            browserId: id,
+            status: 'blocked',
+            landedUrl: currentUrl,
+            resultsScanned: totalScanned + pageMaxScanned,
+            ranAt
+          };
+        }
+
+        if (!isGoogleSearchResultsUrl(currentUrl)) {
+          // If the in-page watcher already followed the matching Google
+          // result, recognize success immediately even if its JS context
+          // disappeared before it could report the click back to Electron.
+          if (hostMatchesTarget(currentUrl, targetHost)) {
+            wc.removeListener('dom-ready', onGoogleDomReady);
+            if (stopGoogleTimer) clearTimeout(stopGoogleTimer);
+            this.setBrowserKeepAlive(id, true, true);
+            return {
+              browserId: id,
+              status: 'matched',
+              landedUrl: currentUrl,
+              resultsScanned: totalScanned + pageMaxScanned,
+              resultPage: pageIndex + 1,
+              keepAliveStarted: true,
+              ranAt
+            };
+          }
+
+          // During the short handoff from the previous document to Google,
+          // executeJavaScript would still address the old/destroyed world.
+          if (navigationErrorMessage) {
+            return {
+              browserId: id,
+              status: 'error',
+              error: `Failed to load Google results page ${pageIndex + 1}: ${navigationErrorMessage}`,
+              ranAt
+            };
+          }
+          await delay(50);
+          continue;
+        }
+
+        googleCommitted = true;
+        if (googleCommittedAt == null) googleCommittedAt = Date.now();
+
+        // Never let a slow Google subresource keep the SEO scanner blocked.
+        // Prefer the real dom-ready signal. Only if Electron somehow misses
+        // it do we force-stop after 750 ms from navigation commit.
+        if (!googleDomReady && !googleLoadStopped) {
+          if (!wc.isLoading()) {
+            // Navigation already stopped naturally; executeJavaScript is no
+            // longer blocked, so scan immediately without the fallback wait.
+            googleLoadStopped = true;
+          } else {
+            if (Date.now() - googleCommittedAt < 750) {
+              await delay(25);
+              continue;
+            }
+            if (isGoogleSearchResultsUrl(wc.getURL())) wc.stop();
+            googleLoadStopped = true;
+            await delay(20);
+          }
+        } else if (!googleLoadStopped && wc.isLoading()) {
+          await delay(25);
+          continue;
+        }
+
+        // Install one watcher inside the Google page itself. It scans the
+        // current DOM immediately, then observes mutations and also retries
+        // every 75 ms. This removes the timing gap between "result painted"
+        // and "main process asked the page to scan".
+        if (!autoClickInstalled) {
+          try {
+            const initialState = (await wc.executeJavaScript(
+              buildGoogleAutoClickInstallerScript(targetHost),
+              true
+            )) as GoogleAutoClickState | null;
+            autoClickInstalled = true;
+
+            if (initialState?.status === 'blocked') {
+              return {
+                browserId: id,
+                status: 'blocked',
+                landedUrl: wc.getURL(),
+                resultsScanned: totalScanned + pageMaxScanned,
+                ranAt
+              };
+            }
+
+            if (initialState?.status === 'clicked' && initialState.url) {
+              latestScan = {
+                blocked: false,
+                ready: true,
+                resultsScanned: Math.max(1, (initialState.organicIndex ?? 0) + 1),
+                match: {
+                  url: initialState.url,
+                  title: initialState.title ?? '',
+                  organicIndex: initialState.organicIndex ?? 0,
+                  clickPoint: initialState.clickPoint
+                }
+              };
+              pageMaxScanned = Math.max(pageMaxScanned, latestScan.resultsScanned);
+              autoClickTriggered = true;
+              break;
+            }
+          } catch {
+            await delay(60);
+            continue;
+          }
+        } else {
+          try {
+            const watcherState = (await wc.executeJavaScript(buildGoogleAutoClickStateScript())) as GoogleAutoClickState | null;
+            if (watcherState?.status === 'blocked') {
+              return {
+                browserId: id,
+                status: 'blocked',
+                landedUrl: wc.getURL(),
+                resultsScanned: totalScanned + pageMaxScanned,
+                ranAt
+              };
+            }
+            if (watcherState?.status === 'clicked' && watcherState.url) {
+              latestScan = {
+                blocked: false,
+                ready: true,
+                resultsScanned: Math.max(1, (watcherState.organicIndex ?? 0) + 1),
+                match: {
+                  url: watcherState.url,
+                  title: watcherState.title ?? '',
+                  organicIndex: watcherState.organicIndex ?? 0,
+                  clickPoint: watcherState.clickPoint
+                }
+              };
+              pageMaxScanned = Math.max(pageMaxScanned, latestScan.resultsScanned);
+              autoClickTriggered = true;
+              break;
+            }
+          } catch {
+            // A navigation can replace the Google document between reads.
+          }
+        }
+
+        try {
+          latestScan = (await wc.executeJavaScript(buildGoogleResultScanScript(targetHost))) as GoogleResultScan;
+        } catch {
+          // Chromium may replace the document between navigation commit and
+          // the first rendered result. This is transient, not a failed SEO
+          // run. Retry aggressively until result anchors become available.
+          await delay(80);
+          continue;
+        }
+
+        if (latestScan.blocked) {
+          return {
+            browserId: id,
+            status: 'blocked',
+            landedUrl: wc.getURL(),
+            resultsScanned: totalScanned + pageMaxScanned,
+            ranAt
+          };
+        }
+
+        pageMaxScanned = Math.max(pageMaxScanned, latestScan.resultsScanned);
+        if (latestScan.match) break;
+
+        // Once any result markup exists, check essentially in real time.
+        // Do not wait for document.readyState === complete.
+        await delay(latestScan.ready ? 100 : 80);
+      }
+
+      if (!googleCommitted && navigationErrorMessage) {
+        return {
+          browserId: id,
+          status: 'error',
+          error: `Failed to load Google results page ${pageIndex + 1}: ${navigationErrorMessage}`,
+          ranAt
+        };
+      }
+
+      wc.removeListener('dom-ready', onGoogleDomReady);
+      if (stopGoogleTimer) {
+        clearTimeout(stopGoogleTimer);
+        stopGoogleTimer = null;
+      }
+
+      totalScanned += pageMaxScanned;
+      if (!latestScan.match) continue;
+
+      let clicked = autoClickTriggered;
+      const point = latestScan.match.clickPoint;
+      if (point && Number.isFinite(point.x) && Number.isFinite(point.y)) {
+        // Send a native Chromium mouse gesture directly to the BrowserView.
+        // This does not depend on Google's JS click handlers accepting a
+        // synthetic HTMLElement.click() and works with separately-rendered
+        // domain/title markup like the current desktop SERP.
+        const x = Math.max(1, Math.round(point.x));
+        const y = Math.max(1, Math.round(point.y));
+        wc.sendInputEvent({ type: 'mouseMove', x, y });
+        wc.sendInputEvent({ type: 'mouseDown', x, y, button: 'left', clickCount: 1 });
+        wc.sendInputEvent({ type: 'mouseUp', x, y, button: 'left', clickCount: 1 });
+        clicked = true;
+      }
+
+      // DOM click is retained only as a fallback for unusual layouts where
+      // the target is detectable but Chromium does not expose a usable rect.
+      if (!clicked) {
+        clicked = (await wc
+          .executeJavaScript(buildClickGoogleTargetResultScript(targetHost), true)
+          .catch(() => false)) as boolean;
+      }
+
+      if (!clicked) {
+        return {
+          browserId: id,
+          status: 'error',
+          error: `Found "${latestScan.match.title}" on Google page ${pageIndex + 1}, but could not click it.`,
+          landedUrl: wc.getURL(),
+          resultsScanned: totalScanned,
+          ranAt
+        };
+      }
+
+      // Once Google has identified the actual result URL, verify against
+      // that concrete hostname. This is important when the user entered a
+      // website name like "appareldiary" instead of "appareldiary.com".
+      const verificationTarget = normalizeTargetHost(latestScan.match.url) || targetHost;
+      const deadline = Date.now() + 15_000;
+      let landedUrl = wc.getURL();
+      while (Date.now() < deadline) {
+        await delay(120);
+        landedUrl = wc.getURL();
+        if (hostMatchesTarget(landedUrl, verificationTarget)) break;
+      }
+
+      if (!hostMatchesTarget(landedUrl, verificationTarget)) {
+        return {
+          browserId: id,
+          status: 'error',
+          error: `Google result was clicked, but the browser did not land on ${verificationTarget} within 15 seconds.`,
+          landedUrl,
+          matchedTitle: latestScan.match.title,
+          resultsScanned: totalScanned,
+          position: pageIndex * 10 + latestScan.match.organicIndex + 1,
+          resultPage: pageIndex + 1,
+          ranAt
+        };
+      }
+
+      this.setBrowserKeepAlive(id, true, true);
       return {
         browserId: id,
-        status: 'error',
-        error: `Matched "${match.title}" but failed to open it: ${(err as Error).message}`,
+        status: 'matched',
+        landedUrl,
+        matchedTitle: latestScan.match.title,
+        resultsScanned: totalScanned,
+        position: pageIndex * 10 + latestScan.match.organicIndex + 1,
+        resultPage: pageIndex + 1,
+        keepAliveStarted: true,
         ranAt
       };
     }
 
     return {
       browserId: id,
-      status: 'matched',
-      landedUrl: match.url,
-      matchedTitle: match.title,
-      resultsScanned: results.length,
+      status: 'no-match',
+      landedUrl: lastSearchUrl || wc.getURL(),
+      resultsScanned: totalScanned,
       ranAt
     };
   }
@@ -516,10 +840,17 @@ export class BrowserManager extends EventEmitter {
   async destroyBrowser(id: number): Promise<void> {
     const managed = this.browsers.get(id);
     if (!managed) return;
+
+    // Explicitly clear runtime browser data before disposal. The partition
+    // is already non-persistent, so this is defense in depth for clean exit.
+    await Promise.allSettled([
+      managed.session.clearStorageData(),
+      managed.session.clearCache(),
+      managed.session.setProxy({ mode: 'direct' })
+    ]);
+
     this.window?.removeBrowserView(managed.view);
     // @ts-expect-error — destroy() exists on the underlying WebContents at runtime
-    // across supported Electron versions but is intentionally left out of some
-    // type defs; guarded by the isDestroyed check to avoid double-free errors.
     if (!managed.view.webContents.isDestroyed()) managed.view.webContents.destroy?.();
     this.browsers.delete(id);
   }
@@ -532,150 +863,708 @@ export class BrowserManager extends EventEmitter {
     clipboard.writeText(text);
   }
 
-  /**
-   * Periodically nudges every managed browser with a full page scroll (down
-   * to the bottom, back to the top, twice over) so sites see real, sustained
-   * scroll/DOM activity and don't treat the tab as idle — this is what keeps
-   * a logged-in session (search results, a shopping cart, a form in
-   * progress) from timing out while you're away from the app and not
-   * actually interacting with anything. A 1px nudge was too small for some
-   * sites' idle detectors to register as real activity, so this walks the
-   * whole scrollable height instead. Safe to call repeatedly with new
-   * settings — it always clears any previous timer first, so re-configuring
-   * (interval change, or turning it off) never stacks multiple timers.
-   */
-  setKeepAlive(enabled: boolean, intervalMs: number): void {
-    if (this.keepAliveTimer) {
-      clearInterval(this.keepAliveTimer);
-      this.keepAliveTimer = null;
-    }
-    if (!enabled) return;
+  private ensureKeepAliveTimer(): void {
+    if (this.keepAliveTimer) return;
+    // Keep the driver independent from bootstrap timing. Individual browser
+    // buttons can therefore start Keep Alive even during late initialization.
+    this.keepAliveTimer = setInterval(() => this.tickKeepAlive(), 500);
+  }
 
-    this.keepAliveTimer = setInterval(() => {
-      for (const managed of this.browsers.values()) {
-        const wc = managed.view.webContents;
-        if (wc.isDestroyed()) continue;
-        wc.executeJavaScript(KEEP_ALIVE_SCROLL_SCRIPT, true).catch(() => {
-          // Page not ready, no scrollable content, or a cross-origin/CSP
-          // quirk — never worth surfacing as an error for a background nudge.
-        });
+  configureKeepAlive(intervalMs: number, maxHops: number, _followLinks: boolean): void {
+    this.keepAliveIntervalMs = Math.max(5_000, Math.min(3_600_000, Math.floor(intervalMs || 60_000)));
+    // This central value is the maximum number of content pages processed
+    // by each Keep Alive run, including the initial landing page.
+    this.keepAliveMaxHops = Math.max(1, Math.min(1000, Math.floor(maxHops || 1)));
+    // Enhanced Keep Alive always follows eligible same-site content after
+    // completing the full-page scroll cycles, as requested.
+    this.keepAliveFollowLinks = true;
+    this.ensureKeepAliveTimer();
+  }
+
+  setKeepAlive(enabled: boolean, intervalMs: number): void {
+    this.configureKeepAlive(intervalMs, this.keepAliveMaxHops, this.keepAliveFollowLinks);
+    this.setKeepAliveAll(enabled, enabled);
+  }
+
+  setBrowserKeepAlive(id: number, enabled: boolean, resetHops = false): void {
+    this.ensureKeepAliveTimer();
+    const managed = this.get(id);
+    managed.keepAliveEnabled = enabled;
+    if (resetHops) {
+      managed.keepAliveHops = 0;
+      managed.keepAliveVisited.clear();
+      const currentUrl = managed.view.webContents.getURL();
+      if (currentUrl) managed.keepAliveVisited.add(currentUrl);
+    }
+    managed.keepAliveNextAt = enabled ? Date.now() : Number.POSITIVE_INFINITY;
+    this.updateState(managed, {
+      keepAliveEnabled: enabled,
+      keepAliveHops: managed.keepAliveHops
+    });
+    if (enabled) queueMicrotask(() => this.tickKeepAlive());
+  }
+
+  setKeepAliveAll(enabled: boolean, resetHops = false): void {
+    this.ensureKeepAliveTimer();
+    for (const managed of this.browsers.values()) {
+      managed.keepAliveEnabled = enabled;
+      if (resetHops) {
+        managed.keepAliveHops = 0;
+        managed.keepAliveVisited.clear();
+        const currentUrl = managed.view.webContents.getURL();
+        if (currentUrl) managed.keepAliveVisited.add(currentUrl);
       }
-    }, intervalMs);
+      managed.keepAliveNextAt = enabled ? Date.now() : Number.POSITIVE_INFINITY;
+      this.updateState(managed, {
+        keepAliveEnabled: enabled,
+        keepAliveHops: managed.keepAliveHops
+      });
+    }
+    if (enabled) queueMicrotask(() => this.tickKeepAlive());
+  }
+
+  private tickKeepAlive(): void {
+    const now = Date.now();
+    for (const managed of this.browsers.values()) {
+      if (!managed.keepAliveEnabled || managed.keepAliveBusy || now < managed.keepAliveNextAt) continue;
+
+      const wc = managed.view.webContents;
+      // Query Chromium directly instead of trusting a renderer-facing
+      // loading flag that can remain stale after an aborted navigation.
+      if (wc.isDestroyed() || wc.isLoading()) {
+        managed.keepAliveNextAt = now + 750;
+        continue;
+      }
+
+      managed.keepAliveBusy = true;
+      void this.runKeepAliveAction(managed).finally(() => {
+        managed.keepAliveBusy = false;
+        // Preserve a short retry explicitly scheduled by the action's error
+        // handler; otherwise use the normal jittered content-page interval.
+        if (managed.keepAliveNextAt <= Date.now()) {
+          const jitter = 0.8 + Math.random() * 0.4;
+          managed.keepAliveNextAt = Date.now() + Math.round(this.keepAliveIntervalMs * jitter);
+        }
+      });
+    }
+  }
+
+  private async runKeepAliveAction(managed: ManagedBrowser): Promise<void> {
+    const wc = managed.view.webContents;
+    const pagesVisited = managed.keepAliveHops + 1;
+    const canHop = this.keepAliveFollowLinks && pagesVisited < this.keepAliveMaxHops;
+
+    try {
+      const result = (await wc.executeJavaScript(buildKeepAliveActionScript(canHop), true)) as {
+        links?: string[];
+      };
+
+      const completedAt = new Date().toISOString();
+
+      // The current page has now completed its 6–8 full slow down/up cycles.
+      // If the central page limit is reached, stop this browser's run.
+      if (pagesVisited >= this.keepAliveMaxHops) {
+        managed.keepAliveEnabled = false;
+        this.updateState(managed, {
+          lastKeepAliveAt: completedAt,
+          keepAliveEnabled: false,
+          keepAliveHops: managed.keepAliveHops
+        });
+        return;
+      }
+
+      const candidates = (result.links ?? []).filter((url) => !managed.keepAliveVisited.has(url));
+      if (!canHop || candidates.length === 0) {
+        managed.keepAliveEnabled = false;
+        this.updateState(managed, {
+          lastKeepAliveAt: completedAt,
+          keepAliveEnabled: false,
+          keepAliveHops: managed.keepAliveHops
+        });
+        return;
+      }
+
+      const nextUrl = candidates[Math.floor(Math.random() * candidates.length)];
+      managed.keepAliveVisited.add(nextUrl);
+      await wc.loadURL(nextUrl);
+      managed.keepAliveHops += 1;
+      this.updateState(managed, {
+        keepAliveEnabled: true,
+        keepAliveHops: managed.keepAliveHops,
+        lastKeepAliveAt: completedAt
+      });
+    } catch (err) {
+      // A navigation can make script execution temporarily unavailable.
+      // Retry, but record the reason instead of silently doing nothing.
+      logger.warn(
+        'browser',
+        `Browser ${managed.id}: Keep Alive action failed: ${(err as Error).message}`
+      );
+      managed.keepAliveNextAt = Date.now() + 1500;
+    }
   }
 }
 
-/**
- * Scrolls the page all the way to the bottom and back to the top, twice
- * (down, up, down, up), pausing at each end so the motion — and the scroll
- * events it fires — look like a real, sustained visit rather than a single
- * flicked wheel-tick. The browser's native `behavior: 'smooth'` scroll is
- * too quick to read as a slow, deliberate scroll (it runs at a roughly
- * fixed pixel speed with no way to configure it), so this animates the
- * scroll itself frame-by-frame over a fixed duration instead, which is what
- * actually lets the speed be tuned via SCROLL_DURATION_MS/PAUSE_MS below.
- * Runs as an async IIFE so `executeJavaScript`'s returned promise resolves
- * only once the whole sequence finishes.
- */
-const KEEP_ALIVE_SCROLL_SCRIPT = `
-(async () => {
-  const SCROLL_DURATION_MS = 3500; // time to travel from top to bottom (or back) — raise to scroll slower
-  const PAUSE_MS = 900; // pause at each end before reversing direction
+export function buildKeepAliveActionScript(allowHop: boolean): string {
+  return `(async () => {
+    const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+    const root = document.scrollingElement || document.documentElement || document.body;
+    const pageHeight = () => Math.max(
+      root ? root.scrollHeight : 0,
+      document.documentElement ? document.documentElement.scrollHeight : 0,
+      document.body ? document.body.scrollHeight : 0
+    );
+    const maxScroll = () => Math.max(0, pageHeight() - window.innerHeight);
 
-  const scrollEl = document.scrollingElement || document.documentElement;
-  const maxScroll = Math.max(0, scrollEl.scrollHeight - window.innerHeight);
-  if (maxScroll <= 0) {
-    // Nothing to scroll (short page) — still nudge with a tiny scroll so
-    // there is at least some activity for the idle detector to see.
-    window.scrollBy(0, 1);
-    window.scrollBy(0, -1);
-    return;
-  }
+    const animateScrollTo = (target, duration) =>
+      new Promise((resolve) => {
+        const startY = window.scrollY;
+        const delta = target - startY;
+        if (Math.abs(delta) < 2) {
+          window.scrollTo(0, target);
+          resolve();
+          return;
+        }
 
-  const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+        const started = performance.now();
+        function frame(now) {
+          const t = Math.min(1, (now - started) / duration);
+          const eased = t < 0.5
+            ? 2 * t * t
+            : 1 - Math.pow(-2 * t + 2, 2) / 2;
+          window.scrollTo(0, startY + delta * eased);
+          if (t < 1) requestAnimationFrame(frame);
+          else resolve();
+        }
+        requestAnimationFrame(frame);
+      });
 
-  // Animates the scroll position to \`target\` over \`duration\` ms with a
-  // gentle ease-in-out, rather than jumping/native-smooth-scrolling there —
-  // this is the actual knob that controls how slow the motion looks.
-  const animateScrollTo = (target, duration) =>
-    new Promise((resolve) => {
-      const startY = window.scrollY;
-      const delta = target - startY;
-      if (delta === 0) {
-        resolve();
-        return;
+    const cycles = 6 + Math.floor(Math.random() * 3); // 6, 7 or 8
+    if (maxScroll() > 0) {
+      // Immediate visible feedback, then the requested full cycles.
+      window.scrollTo(0, Math.min(180, maxScroll()));
+      await wait(140);
+      window.scrollTo(0, 0);
+      await wait(180);
+      await animateScrollTo(0, 700);
+      await wait(250);
+
+      for (let cycle = 0; cycle < cycles; cycle += 1) {
+        const downDuration = 3400 + Math.floor(Math.random() * 1600);
+        const upDuration = 3400 + Math.floor(Math.random() * 1600);
+        await animateScrollTo(maxScroll(), downDuration);
+        await wait(550 + Math.floor(Math.random() * 650));
+        await animateScrollTo(0, upDuration);
+        await wait(550 + Math.floor(Math.random() * 650));
       }
-      const startTime = performance.now();
-      function step(now) {
-        const elapsed = now - startTime;
-        const t = Math.min(1, elapsed / duration);
-        const eased = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
-        window.scrollTo(0, startY + delta * eased);
-        if (t < 1) requestAnimationFrame(step);
-        else resolve();
+    } else {
+      for (let cycle = 0; cycle < cycles; cycle += 1) {
+        window.scrollBy(0, 1);
+        await wait(350);
+        window.scrollBy(0, -1);
+        await wait(350);
       }
-      requestAnimationFrame(step);
+    }
+
+    if (!${allowHop ? 'true' : 'false'}) return { links: [] };
+
+    const blocked = /(login|log-in|logout|sign-in|signin|signup|register|account|cart|basket|checkout|payment|subscribe|privacy|terms|contact|download|delete|remove|admin|wp-admin|wp-login)/i;
+    const currentUrl = new URL(location.href);
+    const currentHost = currentUrl.hostname.toLowerCase().replace(/^www\\./, '');
+    const seen = {};
+    const links = [];
+
+    Array.from(document.querySelectorAll('a[href]')).forEach((anchor) => {
+      try {
+        if (anchor.hasAttribute('download')) return;
+        const rel = (anchor.getAttribute('rel') || '').toLowerCase();
+        if (rel.includes('sponsored') || rel.includes('nofollow sponsored')) return;
+
+        const text = (anchor.textContent || '').trim();
+        if (text.length < 5 || blocked.test(text)) return;
+
+        const url = new URL(anchor.href, location.href);
+        if (!/^https?:$/.test(url.protocol)) return;
+
+        const host = url.hostname.toLowerCase().replace(/^www\\./, '');
+        if (host !== currentHost) return;
+        if (url.href === currentUrl.href || blocked.test(url.pathname + url.search)) return;
+
+        const rect = anchor.getBoundingClientRect();
+        if (rect.width <= 0 || rect.height <= 0) return;
+
+        url.hash = '';
+        const normalized = url.href;
+        if (seen[normalized]) return;
+        seen[normalized] = true;
+        links.push(normalized);
+      } catch (_) {
+        // Ignore malformed/non-web anchors.
+      }
     });
 
-  for (let cycle = 0; cycle < 2; cycle++) {
-    await animateScrollTo(maxScroll, SCROLL_DURATION_MS);
-    await wait(PAUSE_MS);
-    await animateScrollTo(0, SCROLL_DURATION_MS);
-    await wait(PAUSE_MS);
-  }
-})();
-`;
+    return { links: links.slice(0, 100) };
+  })()`;
+}
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-interface ExtractedSearchPage {
-  blocked: boolean;
-  results?: Array<{ url: string; title: string; text: string }>;
-  scriptError?: string;
+function isGoogleSearchResultsUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    return /(^|\.)google\.[a-z.]+$/i.test(parsed.hostname) && parsed.pathname === '/search';
+  } catch {
+    return false;
+  }
 }
 
-/**
- * Runs inside the page (via executeJavaScript), not in this process — no
- * access to Node or anything outside the DOM. Deliberately format-tolerant
- * rather than tied to today's exact Google markup: any `<a>` that wraps an
- * `<h3>` is treated as an organic result link (this has been the stable
- * shape of Google's organic result anchors for years, independent of the
- * surrounding layout classes that change often), and Google's own `/url?q=`
- * redirect wrapper is unwrapped when present. Ads, "People also ask", and
- * any other google.* links are skipped. An "unusual traffic" / consent
- * interstitial is detected up front so a blocked run is never mistaken for
- * a genuine zero-results page.
- */
-const EXTRACT_GOOGLE_RESULTS_SCRIPT = `(function() {
-  try {
-    var loc = window.location.href;
-    if (/\\/sorry\\/|consent\\.google\\./.test(loc)) return { blocked: true };
-    var bodyText = (document.body && document.body.innerText) || '';
-    if (/unusual traffic|not a robot|recaptcha/i.test(bodyText.slice(0, 2000))) return { blocked: true };
+interface GoogleResultScan {
+  blocked: boolean;
+  ready: boolean;
+  resultsScanned: number;
+  match?: {
+    url: string;
+    title: string;
+    organicIndex: number;
+    clickPoint?: { x: number; y: number };
+  };
+}
 
-    var anchors = Array.prototype.slice.call(document.querySelectorAll('a'));
-    var seen = {};
-    var results = [];
-    anchors.forEach(function (a) {
-      var h3 = a.querySelector('h3');
-      if (!h3) return;
-      var href = a.getAttribute('href') || '';
-      var redirectMatch = href.match(/^\\/url\\?q=([^&]+)/);
-      if (redirectMatch) href = decodeURIComponent(redirectMatch[1]);
-      if (!/^https?:\\/\\//.test(href)) return;
-      if (/^https?:\\/\\/(www\\.)?google\\./.test(href)) return;
-      if (seen[href]) return;
-      seen[href] = true;
-      var container = a.closest('div') || a;
-      var text = container.innerText || a.innerText || '';
-      results.push({ url: href, title: h3.innerText || '', text: text.slice(0, 500) });
-    });
-    return { blocked: false, results: results.slice(0, 20) };
-  } catch (e) {
-    return { blocked: false, results: [], scriptError: String(e) };
-  }
-})()`;
+interface GoogleAutoClickState {
+  status: 'watching' | 'blocked' | 'clicked';
+  url?: string;
+  title?: string;
+  organicIndex?: number;
+  clickPoint?: { x: number; y: number };
+}
+
+export function buildGoogleAutoClickStateScript(): string {
+  return `(function() {
+    var state = window.__proxydeskSeoAutoClick;
+    if (!state) return null;
+    return {
+      status: state.status,
+      url: state.url || undefined,
+      title: state.title || undefined,
+      organicIndex: typeof state.organicIndex === 'number' ? state.organicIndex : undefined,
+      clickPoint: state.clickPoint || undefined
+    };
+  })()`;
+}
+
+export function buildGoogleAutoClickInstallerScript(targetHost: string): string {
+  return `(function() {
+    var target = ${JSON.stringify(targetHost.toLowerCase())};
+    var displayMentionsTarget = ${resultTextMentionsHost.toString()};
+    var previous = window.__proxydeskSeoAutoClick;
+    if (previous && previous.observer && previous.observer.disconnect) previous.observer.disconnect();
+    if (previous && previous.timer) clearInterval(previous.timer);
+
+    var state = {
+      status: 'watching',
+      url: null,
+      title: null,
+      organicIndex: null,
+      clickPoint: null,
+      observer: null,
+      timer: null
+    };
+    window.__proxydeskSeoAutoClick = state;
+
+    function normalizeHost(host) {
+      return String(host || '').toLowerCase().replace(/^www\\./, '').replace(/\\.$/, '');
+    }
+
+    function unwrap(href) {
+      try {
+        var resolved = new URL(href, location.href);
+        var googleHost = /(^|\\.)google\\.[a-z.]+$/i.test(resolved.hostname);
+        if (googleHost && resolved.pathname === '/url') {
+          return resolved.searchParams.get('url') || resolved.searchParams.get('q') || href;
+        }
+        return resolved.href;
+      } catch (_) {
+        return href;
+      }
+    }
+
+    function destinationMatches(url) {
+      try {
+        var host = normalizeHost(new URL(url, location.href).hostname);
+        if (host === target || host.endsWith('.' + target)) return true;
+        if (target.indexOf('.') === -1 && host.split('.').indexOf(target) !== -1) return true;
+        return false;
+      } catch (_) {
+        return false;
+      }
+    }
+
+    function isVisible(node) {
+      if (!node || !node.getBoundingClientRect) return false;
+      var r = node.getBoundingClientRect();
+      return r.width > 2 && r.height > 2 && r.bottom >= 0 && r.right >= 0 &&
+        r.top <= window.innerHeight && r.left <= window.innerWidth;
+    }
+
+    function cardFor(anchor) {
+      if (!anchor) return null;
+      var direct = anchor.closest && anchor.closest('.MjjYud, .g, [data-snhf], [data-hveid]');
+      if (direct) return direct;
+      var current = anchor;
+      for (var depth = 0; current && depth < 8; depth += 1, current = current.parentElement) {
+        var text = ((current && current.innerText) || '').slice(0, 2200);
+        if (displayMentionsTarget(text, target)) return current;
+      }
+      return anchor.parentElement || anchor;
+    }
+
+    function stopWatching() {
+      if (state.observer && state.observer.disconnect) state.observer.disconnect();
+      if (state.timer) clearInterval(state.timer);
+      state.observer = null;
+      state.timer = null;
+    }
+
+    function scanAndClick() {
+      try {
+        if (/\\/sorry\\/|consent\\.google\\./.test(location.href)) {
+          state.status = 'blocked';
+          stopWatching();
+          return true;
+        }
+        var bodyText = (document.body && document.body.innerText) || '';
+        if (/unusual traffic|not a robot|recaptcha/i.test(bodyText.slice(0, 3500))) {
+          state.status = 'blocked';
+          stopWatching();
+          return true;
+        }
+
+        var root = document.querySelector('#search') || document.querySelector('#rso') || document.querySelector('main') || document.body;
+        if (!root || !root.querySelectorAll) return false;
+        var anchors = Array.prototype.slice.call(root.querySelectorAll('a[href]'));
+        var candidates = [];
+
+        for (var i = 0; i < anchors.length; i += 1) {
+          var anchor = anchors[i];
+          if (!isVisible(anchor)) continue;
+          var destination = unwrap(anchor.getAttribute('href') || anchor.href || '');
+          var card = cardFor(anchor);
+          var cardText = ((card && card.innerText) || anchor.innerText || '').slice(0, 2200);
+          if (/\\bSponsored\\b/i.test(cardText.slice(0, 260))) continue;
+          var direct = destinationMatches(destination);
+          var cardMatch = displayMentionsTarget(cardText, target);
+          if (!direct && !cardMatch) continue;
+
+          var text = (anchor.innerText || anchor.getAttribute('aria-label') || '').trim();
+          var heading = anchor.querySelector && anchor.querySelector('h3');
+          var score = 0;
+          if (heading) score += 120;
+          if (direct) score += 60;
+          if (text.length >= 18 && !displayMentionsTarget(text, target)) score += 45;
+          try {
+            var parsed = new URL(destination, location.href);
+            if (direct && parsed.pathname && parsed.pathname !== '/') score += 40;
+          } catch (_) {}
+          candidates.push({ anchor: anchor, destination: destination, score: score, index: i, title: ((heading && heading.innerText) || text).trim() });
+        }
+
+        if (!candidates.length) return false;
+        candidates.sort(function(a, b) { return b.score - a.score; });
+        var chosen = candidates[0];
+        var rect = chosen.anchor.getBoundingClientRect();
+        state.status = 'clicked';
+        state.url = chosen.destination;
+        state.title = chosen.title;
+        state.organicIndex = chosen.index;
+        state.clickPoint = { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+        stopWatching();
+
+        try { chosen.anchor.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'auto' }); } catch (_) {}
+        try { chosen.anchor.target = '_self'; } catch (_) {}
+        try { chosen.anchor.focus({ preventScroll: true }); } catch (_) {}
+        try { chosen.anchor.click(); } catch (_) {}
+
+        // Hard fallback: only after the actual Google result anchor has been
+        // identified and clicked. If Google's handlers ignore the synthetic
+        // click, follow that exact result URL from the SERP shortly after.
+        setTimeout(function() {
+          try {
+            if (/^https?:\\/\\/(?:[^.]+\\.)?google\\./i.test(location.href)) {
+              location.assign(chosen.destination);
+            }
+          } catch (_) {}
+        }, 300);
+        return true;
+      } catch (_) {
+        return false;
+      }
+    }
+
+    if (!scanAndClick()) {
+      var observeRoot = document.documentElement || document.body;
+      if (observeRoot && typeof MutationObserver !== 'undefined') {
+        state.observer = new MutationObserver(function() { scanAndClick(); });
+        state.observer.observe(observeRoot, { childList: true, subtree: true, characterData: true });
+      }
+      state.timer = setInterval(scanAndClick, 75);
+    }
+
+    return { status: state.status, url: state.url, title: state.title, organicIndex: state.organicIndex, clickPoint: state.clickPoint };
+  })()`;
+}
+
+export function buildGoogleResultScanScript(targetHost: string): string {
+  return `(function() {
+    try {
+      var target = ${JSON.stringify(targetHost.toLowerCase())};
+      var loc = window.location.href;
+      if (/\\/sorry\\/|consent\\.google\\./.test(loc)) {
+        return { blocked: true, ready: true, resultsScanned: 0 };
+      }
+
+      var bodyText = (document.body && document.body.innerText) || '';
+      if (/unusual traffic|not a robot|recaptcha/i.test(bodyText.slice(0, 2500))) {
+        return { blocked: true, ready: true, resultsScanned: 0 };
+      }
+
+      function unwrap(href) {
+        try {
+          var resolved = new URL(href, location.href);
+          var googleHost = /(^|\\.)google\\.[a-z.]+$/i.test(resolved.hostname);
+          if (googleHost && resolved.pathname === '/url') {
+            return resolved.searchParams.get('url') || resolved.searchParams.get('q') || href;
+          }
+          return resolved.href;
+        } catch (_) {
+          return href;
+        }
+      }
+
+      function normalizeHost(host) {
+        return String(host || '').toLowerCase().replace(/^www\\./, '').replace(/\\.$/, '');
+      }
+
+      function destinationMatches(url) {
+        try {
+          var host = normalizeHost(new URL(url, location.href).hostname);
+          if (host === target || host.endsWith('.' + target)) return true;
+          if (target.indexOf('.') === -1 && host.split('.').indexOf(target) !== -1) return true;
+          return false;
+        } catch (_) {
+          return false;
+        }
+      }
+
+      var displayMentionsTarget = ${resultTextMentionsHost.toString()};
+      var searchRoot = document.querySelector('#search') || document.querySelector('#rso') || document.querySelector('main') || document.body;
+
+      function visibleRect(node) {
+        if (!node || !node.getBoundingClientRect) return null;
+        var rect = node.getBoundingClientRect();
+        if (rect.width <= 2 || rect.height <= 2) return null;
+        if (rect.bottom < 0 || rect.right < 0 || rect.top > window.innerHeight || rect.left > window.innerWidth) return null;
+        return rect;
+      }
+
+      function resultContainerFor(node) {
+        if (!node) return null;
+        var direct = node.closest && node.closest('.MjjYud, .g, [data-snhf], [data-hveid]');
+        if (direct) return direct;
+        var current = node;
+        for (var depth = 0; current && depth < 7; depth += 1, current = current.parentElement) {
+          var text = ((current && current.innerText) || '').slice(0, 1800);
+          if (displayMentionsTarget(text, target) && current.querySelector && current.querySelector('a[href]')) return current;
+        }
+        return node.parentElement || node;
+      }
+
+      function bestAnchor(container, seedAnchor) {
+        var candidates = [];
+        if (seedAnchor) candidates.push(seedAnchor);
+        if (container && container.querySelectorAll) {
+          Array.prototype.slice.call(container.querySelectorAll('a[href]')).forEach(function (a) {
+            if (candidates.indexOf(a) === -1) candidates.push(a);
+          });
+        }
+        var best = null;
+        var bestScore = -1;
+        for (var j = 0; j < candidates.length; j += 1) {
+          var a = candidates[j];
+          if (!visibleRect(a)) continue;
+          var destination = unwrap(a.getAttribute('href') || a.href || '');
+          var text = (a.innerText || a.getAttribute('aria-label') || '').trim();
+          var hasHeading = Boolean(a.querySelector && a.querySelector('h3'));
+          var direct = destinationMatches(destination);
+          var score = 0;
+          if (hasHeading) score += 100;
+          if (direct) score += 40;
+          if (text.length >= 18 && !displayMentionsTarget(text, target)) score += 35;
+          try {
+            var parsedDestination = new URL(destination, location.href);
+            if (direct && parsedDestination.pathname && parsedDestination.pathname !== '/') score += 30;
+          } catch (_) {
+            // Ignore malformed candidate URLs.
+          }
+          if (a === seedAnchor) score += 1;
+          if (score > bestScore) {
+            best = a;
+            bestScore = score;
+          }
+        }
+        return best;
+      }
+
+      var anchors = Array.prototype.slice.call(searchRoot ? searchRoot.querySelectorAll('a[href]') : []);
+      var resultsScanned = 0;
+      for (var i = 0; i < anchors.length; i += 1) {
+        var seed = anchors[i];
+        var destination = unwrap(seed.getAttribute('href') || seed.href || '');
+        var container = resultContainerFor(seed);
+        var nearbyText = ((container && container.innerText) || seed.innerText || '').slice(0, 1800);
+        if (/\\bSponsored\\b/i.test(nearbyText.slice(0, 220))) continue;
+
+        var matched = destinationMatches(destination) || displayMentionsTarget(nearbyText, target);
+        if (!matched) continue;
+
+        var anchor = bestAnchor(container, seed);
+        if (!anchor) continue;
+        var anchorDestination = unwrap(anchor.getAttribute('href') || anchor.href || destination);
+        var titleNode = anchor.querySelector && anchor.querySelector('h3');
+        var titleText = ((titleNode && titleNode.innerText) || anchor.getAttribute('aria-label') || anchor.innerText || '').trim();
+        anchor.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'auto' });
+        var rect = visibleRect(anchor);
+        if (!rect) continue;
+
+        resultsScanned += 1;
+        return {
+          blocked: false,
+          ready: true,
+          resultsScanned: resultsScanned,
+          match: {
+            url: anchorDestination,
+            title: titleText,
+            organicIndex: resultsScanned - 1,
+            clickPoint: {
+              x: rect.left + Math.min(rect.width / 2, Math.max(12, rect.width - 12)),
+              y: rect.top + rect.height / 2
+            }
+          }
+        };
+      }
+
+      // Fallback for Google's current layout where the visible domain line
+      // can be a sibling of the blue title rather than text inside its <a>.
+      var textNodes = Array.prototype.slice.call(searchRoot ? searchRoot.querySelectorAll('span, cite, div') : []);
+      for (var k = 0; k < textNodes.length; k += 1) {
+        var node = textNodes[k];
+        var nodeText = (node.innerText || '').trim();
+        if (!displayMentionsTarget(nodeText, target)) continue;
+        var card = resultContainerFor(node);
+        var cardText = ((card && card.innerText) || '').slice(0, 1800);
+        if (/\\bSponsored\\b/i.test(cardText.slice(0, 220))) continue;
+        var fallbackAnchor = bestAnchor(card, node.closest && node.closest('a[href]'));
+        if (!fallbackAnchor) continue;
+        var fallbackRect = visibleRect(fallbackAnchor);
+        if (!fallbackRect) continue;
+        var fallbackDestination = unwrap(fallbackAnchor.getAttribute('href') || fallbackAnchor.href || '');
+        var fallbackTitleNode = fallbackAnchor.querySelector && fallbackAnchor.querySelector('h3');
+        var fallbackTitle = ((fallbackTitleNode && fallbackTitleNode.innerText) || fallbackAnchor.getAttribute('aria-label') || fallbackAnchor.innerText || '').trim();
+        fallbackAnchor.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'auto' });
+        fallbackRect = visibleRect(fallbackAnchor) || fallbackRect;
+        resultsScanned += 1;
+        return {
+          blocked: false,
+          ready: true,
+          resultsScanned: resultsScanned,
+          match: {
+            url: fallbackDestination,
+            title: fallbackTitle,
+            organicIndex: resultsScanned - 1,
+            clickPoint: {
+              x: fallbackRect.left + Math.min(fallbackRect.width / 2, Math.max(12, fallbackRect.width - 12)),
+              y: fallbackRect.top + fallbackRect.height / 2
+            }
+          }
+        };
+      }
+
+      return {
+        blocked: false,
+        ready: anchors.length > 0 || document.readyState === 'complete',
+        resultsScanned: resultsScanned
+      };
+    } catch (_) {
+      return { blocked: false, ready: false, resultsScanned: 0 };
+    }
+  })()`;
+}
+
+export function buildClickGoogleTargetResultScript(targetHost: string): string {
+  return `(function() {
+    try {
+      var target = ${JSON.stringify(targetHost.toLowerCase())};
+      var displayMentionsTarget = ${resultTextMentionsHost.toString()};
+
+      function unwrap(href) {
+        try {
+          var resolved = new URL(href, location.href);
+          var googleHost = /(^|\\.)google\\.[a-z.]+$/i.test(resolved.hostname);
+          if (googleHost && resolved.pathname === '/url') {
+            return resolved.searchParams.get('url') || resolved.searchParams.get('q') || href;
+          }
+          return resolved.href;
+        } catch (_) {
+          return href;
+        }
+      }
+
+      function normalizeHost(host) {
+        return String(host || '').toLowerCase().replace(/^www\\./, '').replace(/\\.$/, '');
+      }
+
+      function destinationMatches(url) {
+        try {
+          var host = normalizeHost(new URL(url, location.href).hostname);
+          if (host === target || host.endsWith('.' + target)) return true;
+          if (target.indexOf('.') === -1 && host.split('.').indexOf(target) !== -1) return true;
+          return false;
+        } catch (_) {
+          return false;
+        }
+      }
+
+      var searchRoot = document.querySelector('#search') || document.querySelector('#rso') || document.querySelector('main') || document.body;
+      var anchors = Array.prototype.slice.call(searchRoot ? searchRoot.querySelectorAll('a[href]') : []);
+      for (var i = 0; i < anchors.length; i += 1) {
+        var anchor = anchors[i];
+        var destination = unwrap(anchor.getAttribute('href') || anchor.href || '');
+        var container = anchor.closest('.MjjYud, .g, [data-snhf]') ||
+          (anchor.parentElement && anchor.parentElement.parentElement && anchor.parentElement.parentElement.parentElement) ||
+          anchor.parentElement || anchor;
+        var nearbyText = ((container && container.innerText) || anchor.innerText || '').slice(0, 1200);
+        if (/\\bSponsored\\b/i.test(nearbyText.slice(0, 180))) continue;
+
+        var displayText = nearbyText.toLowerCase().replace(/www\\./g, '');
+        var directMatch = destinationMatches(destination);
+        var textMatch = displayMentionsTarget(displayText, target);
+        if (!directMatch && !textMatch) continue;
+
+        // Prefer the actual result-title/citation anchor. A visible target
+        // citation is still accepted when Google changes the heading markup.
+        if (!anchor.querySelector('h3') && !directMatch && !displayMentionsTarget(anchor.innerText || '', target)) continue;
+        anchor.scrollIntoView({ block: 'center', behavior: 'auto' });
+        anchor.focus({ preventScroll: true });
+        anchor.click();
+        return true;
+      }
+      return false;
+    } catch (_) {
+      return false;
+    }
+  })()`;
+}
 
 function normalizeUrl(input: string): string {
   const trimmed = input.trim();

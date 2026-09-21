@@ -1,6 +1,7 @@
 import type { BrowserState, BrowserBounds, BroadcastSearchResult } from './browser';
 import type { ProxyRecord, ProxyImportResult, ReloadProgress, ReloadProxiesSummary } from './proxy';
 import type { AppSettings } from './settings';
+import type { SeoAutomationConfig, SeoAutomationResult, SeoAutomationState } from './automation';
 
 /**
  * Typed IPC contract. This is the ONLY surface exposed to the renderer via
@@ -47,11 +48,14 @@ export interface AppApi {
     checkIp(id: number): Promise<IpCheckResult>;
     checkAllIps(): Promise<IpCheckResult[]>;
     restart(id: number): Promise<void>;
-    broadcastSearch(ids: number[], query: string, matchText: string): Promise<BroadcastSearchResult[]>;
+    broadcastSearch(ids: number[], query: string, targetWebsite: string): Promise<BroadcastSearchResult[]>;
+    setKeepAlive(id: number, enabled: boolean): Promise<void>;
+    setKeepAliveAll(enabled: boolean): Promise<void>;
     onStateChanged(cb: (state: BrowserState) => void): () => void;
   };
   proxy: {
     reload(countryCode: string | null): Promise<ReloadProxiesSummary>;
+    rotateNow(countryCode: string | null): Promise<ReloadProxiesSummary>;
     getAll(): Promise<ProxyRecord[]>;
     assign(browserId: number, proxyId: string | null): Promise<void>;
     replaceFailed(browserId: number): Promise<ProxyRecord | null>;
@@ -64,6 +68,14 @@ export interface AppApi {
     exportProxies(format: 'txt' | 'csv' | 'json'): Promise<string>;
     onAssignmentsChanged(cb: (summary: ReloadProxiesSummary) => void): () => void;
     onReloadProgress(cb: (progress: ReloadProgress) => void): () => void;
+  };
+  automation: {
+    getState(): Promise<SeoAutomationState>;
+    start(config: SeoAutomationConfig): Promise<SeoAutomationState>;
+    stop(): Promise<SeoAutomationState>;
+    runNow(): Promise<SeoAutomationState>;
+    onStateChanged(cb: (state: SeoAutomationState) => void): () => void;
+    onSeoResult(cb: (payload: SeoAutomationResult) => void): () => void;
   };
   settings: {
     get(): Promise<AppSettings>;
@@ -96,9 +108,12 @@ export const IPC_CHANNELS = {
   browserCheckAllIps: 'browser:checkAllIps',
   browserRestart: 'browser:restart',
   browserBroadcastSearch: 'browser:broadcastSearch',
+  browserSetKeepAlive: 'browser:setKeepAlive',
+  browserSetKeepAliveAll: 'browser:setKeepAliveAll',
   browserStateChanged: 'browser:stateChanged',
 
   proxyReload: 'proxy:reload',
+  proxyRotateNow: 'proxy:rotateNow',
   proxyGetAll: 'proxy:getAll',
   proxyAssign: 'proxy:assign',
   proxyReplaceFailed: 'proxy:replaceFailed',
@@ -111,6 +126,13 @@ export const IPC_CHANNELS = {
   proxyExport: 'proxy:export',
   proxyAssignmentsChanged: 'proxy:assignmentsChanged',
   proxyReloadProgress: 'proxy:reloadProgress',
+
+  automationGetState: 'automation:getState',
+  automationStart: 'automation:start',
+  automationStop: 'automation:stop',
+  automationRunNow: 'automation:runNow',
+  automationStateChanged: 'automation:stateChanged',
+  automationSeoResult: 'automation:seoResult',
 
   settingsGet: 'settings:get',
   settingsUpdate: 'settings:update',

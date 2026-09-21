@@ -25,6 +25,9 @@ export interface BrowserSettings {
    * you're away from the app. */
   keepAliveEnabled: boolean;
   keepAliveIntervalSec: number;
+  keepAliveFollowLinks: boolean;
+  keepAliveMaxHops: number;
+  seoMaxPages: number;
 }
 
 export interface ProxySettings {
@@ -51,7 +54,10 @@ export interface ProxySettings {
   allowProxyReuse: boolean;
   preferredProtocols: ProxyProtocol[];
   preferredCountryCode: string | null;
-  rotationInterval: ProxyRotationInterval;
+  autoRotationEnabled: boolean;
+  rotationIntervalSec: number;
+  /** @deprecated Legacy setting retained so older saved settings still load. */
+  rotationInterval?: ProxyRotationInterval;
   ipCheckUrl: string;
   maxConcurrentChecks: number;
 }
@@ -86,22 +92,26 @@ export const DEFAULT_SETTINGS: AppSettings = {
     gridColumns: 2,
     gridSquareTiles: false,
     tileMinHeight: 340,
-    persistSessions: true,
+    persistSessions: false,
     startPage: 'https://example.com',
     userAgent: '',
     hardwareAcceleration: true,
     keepAliveEnabled: false,
-    keepAliveIntervalSec: 60
+    keepAliveIntervalSec: 60,
+    keepAliveFollowLinks: true,
+    keepAliveMaxHops: 25,
+    seoMaxPages: 5
   },
   proxy: {
-    autoLoadOnStartup: true,
+    autoLoadOnStartup: false,
     autoReplaceFailed: true,
     validationEnabled: true,
     validationTimeoutMs: 6000,
     allowProxyReuse: false,
     preferredProtocols: ['http', 'https', 'socks4', 'socks5'],
     preferredCountryCode: null,
-    rotationInterval: 'manual',
+    autoRotationEnabled: false,
+    rotationIntervalSec: 60,
     ipCheckUrl: 'https://api.ipify.org?format=json',
     maxConcurrentChecks: 25
   },
