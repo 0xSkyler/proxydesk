@@ -533,6 +533,8 @@ export class BrowserManager extends EventEmitter {
       let latestScan: GoogleResultScan = { blocked: false, ready: false, resultsScanned: 0 };
       let pageMaxScanned = 0;
       let googleCommitted = false;
+      let autoClickInstalled = false;
+      let autoClickTriggered = false;
 
       while (Date.now() < scanDeadline) {
         const currentUrl = wc.getURL();
@@ -550,9 +552,24 @@ export class BrowserManager extends EventEmitter {
         }
 
         if (!isGoogleSearchResultsUrl(currentUrl)) {
+          // If the in-page watcher already followed the matching Google
+          // result, recognize success immediately even if its JS context
+          // disappeared before it could report the click back to Electron.
+          if (hostMatchesTarget(currentUrl, targetHost)) {
+            this.setBrowserKeepAlive(id, true, true);
+            return {
+              browserId: id,
+              status: 'matched',
+              landedUrl: currentUrl,
+              resultsScanned: totalScanned + pageMaxScanned,
+              resultPage: pageIndex + 1,
+              keepAliveStarted: true,
+              ranAt
+            };
+          }
+
           // During the short handoff from the previous document to Google,
           // executeJavaScript would still address the old/destroyed world.
-          // Wait only a few milliseconds for the search URL to commit.
           if (navigationErrorMessage) {
             return {
               browserId: id,
@@ -561,11 +578,87 @@ export class BrowserManager extends EventEmitter {
               ranAt
             };
           }
-          await delay(75);
+          await delay(50);
           continue;
         }
 
         googleCommitted = true;
+
+        // Install one watcher inside the Google page itself. It scans the
+        // current DOM immediately, then observes mutations and also retries
+        // every 75 ms. This removes the timing gap between "result painted"
+        // and "main process asked the page to scan".
+        if (!autoClickInstalled) {
+          try {
+            const initialState = (await wc.executeJavaScript(
+              buildGoogleAutoClickInstallerScript(targetHost),
+              true
+            )) as GoogleAutoClickState | null;
+            autoClickInstalled = true;
+
+            if (initialState?.status === 'blocked') {
+              return {
+                browserId: id,
+                status: 'blocked',
+                landedUrl: wc.getURL(),
+                resultsScanned: totalScanned + pageMaxScanned,
+                ranAt
+              };
+            }
+
+            if (initialState?.status === 'clicked' && initialState.url) {
+              latestScan = {
+                blocked: false,
+                ready: true,
+                resultsScanned: Math.max(1, (initialState.organicIndex ?? 0) + 1),
+                match: {
+                  url: initialState.url,
+                  title: initialState.title ?? '',
+                  organicIndex: initialState.organicIndex ?? 0,
+                  clickPoint: initialState.clickPoint
+                }
+              };
+              pageMaxScanned = Math.max(pageMaxScanned, latestScan.resultsScanned);
+              autoClickTriggered = true;
+              break;
+            }
+          } catch {
+            await delay(60);
+            continue;
+          }
+        } else {
+          try {
+            const watcherState = (await wc.executeJavaScript(buildGoogleAutoClickStateScript())) as GoogleAutoClickState | null;
+            if (watcherState?.status === 'blocked') {
+              return {
+                browserId: id,
+                status: 'blocked',
+                landedUrl: wc.getURL(),
+                resultsScanned: totalScanned + pageMaxScanned,
+                ranAt
+              };
+            }
+            if (watcherState?.status === 'clicked' && watcherState.url) {
+              latestScan = {
+                blocked: false,
+                ready: true,
+                resultsScanned: Math.max(1, (watcherState.organicIndex ?? 0) + 1),
+                match: {
+                  url: watcherState.url,
+                  title: watcherState.title ?? '',
+                  organicIndex: watcherState.organicIndex ?? 0,
+                  clickPoint: watcherState.clickPoint
+                }
+              };
+              pageMaxScanned = Math.max(pageMaxScanned, latestScan.resultsScanned);
+              autoClickTriggered = true;
+              break;
+            }
+          } catch {
+            // A navigation can replace the Google document between reads.
+          }
+        }
+
         try {
           latestScan = (await wc.executeJavaScript(buildGoogleResultScanScript(targetHost))) as GoogleResultScan;
         } catch {
@@ -606,7 +699,7 @@ export class BrowserManager extends EventEmitter {
       totalScanned += pageMaxScanned;
       if (!latestScan.match) continue;
 
-      let clicked = false;
+      let clicked = autoClickTriggered;
       const point = latestScan.match.clickPoint;
       if (point && Number.isFinite(point.x) && Number.isFinite(point.y)) {
         // Send a native Chromium mouse gesture directly to the BrowserView.
@@ -640,19 +733,23 @@ export class BrowserManager extends EventEmitter {
         };
       }
 
+      // Once Google has identified the actual result URL, verify against
+      // that concrete hostname. This is important when the user entered a
+      // website name like "appareldiary" instead of "appareldiary.com".
+      const verificationTarget = normalizeTargetHost(latestScan.match.url) || targetHost;
       const deadline = Date.now() + 15_000;
       let landedUrl = wc.getURL();
       while (Date.now() < deadline) {
-        await delay(200);
+        await delay(120);
         landedUrl = wc.getURL();
-        if (hostMatchesTarget(landedUrl, targetHost)) break;
+        if (hostMatchesTarget(landedUrl, verificationTarget)) break;
       }
 
-      if (!hostMatchesTarget(landedUrl, targetHost)) {
+      if (!hostMatchesTarget(landedUrl, verificationTarget)) {
         return {
           browserId: id,
           status: 'error',
-          error: `Google result was clicked, but the browser did not land on ${targetHost} within 15 seconds.`,
+          error: `Google result was clicked, but the browser did not land on ${verificationTarget} within 15 seconds.`,
           landedUrl,
           matchedTitle: latestScan.match.title,
           resultsScanned: totalScanned,
