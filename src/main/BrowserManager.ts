@@ -517,34 +517,63 @@ export class BrowserManager extends EventEmitter {
       const searchUrl = buildGoogleSearchUrl(query, pageIndex);
       lastSearchUrl = searchUrl;
 
-      try {
-        await wc.loadURL(searchUrl);
-      } catch (err) {
-        return {
-          browserId: id,
-          status: 'error',
-          error: `Failed to load Google results page ${pageIndex + 1}: ${(err as Error).message}`,
-          ranAt
-        };
-      }
+      // IMPORTANT: do not await loadURL here. Electron resolves loadURL only
+      // after navigation finishes, but Google results can already be visible
+      // and clickable long before images/scripts/other resources finish.
+      // Start navigation and scan the newly committed Google DOM in parallel.
+      let navigationError: Error | null = null;
+      void wc.loadURL(searchUrl).catch((err) => {
+        const message = (err as Error).message || String(err);
+        // Clicking a result while Google is still loading intentionally
+        // aborts the original search navigation. That is a success path.
+        if (!/ERR_ABORTED|-3/i.test(message)) navigationError = err as Error;
+      });
 
-      // Slow proxies can visibly paint the first page before all result
-      // links are queryable. Poll the SAME page for up to 10 seconds and
-      // only paginate after the target still cannot be found.
-      const scanDeadline = Date.now() + 10_000;
+      const scanDeadline = Date.now() + 12_000;
       let latestScan: GoogleResultScan = { blocked: false, ready: false, resultsScanned: 0 };
       let pageMaxScanned = 0;
+      let googleCommitted = false;
 
       while (Date.now() < scanDeadline) {
-        try {
-          latestScan = (await wc.executeJavaScript(buildGoogleResultScanScript(targetHost))) as GoogleResultScan;
-        } catch (err) {
+        const currentUrl = wc.getURL();
+
+        // The URL commits before the full page finishes loading. As soon as
+        // that happens we can inspect Google's progressively-rendered DOM.
+        if (extractGoogleBlockContinueUrl(currentUrl)) {
           return {
             browserId: id,
-            status: 'error',
-            error: `Failed to read Google results: ${(err as Error).message}`,
+            status: 'blocked',
+            landedUrl: currentUrl,
+            resultsScanned: totalScanned + pageMaxScanned,
             ranAt
           };
+        }
+
+        if (!isGoogleSearchResultsUrl(currentUrl)) {
+          // During the short handoff from the previous document to Google,
+          // executeJavaScript would still address the old/destroyed world.
+          // Wait only a few milliseconds for the search URL to commit.
+          if (navigationError) {
+            return {
+              browserId: id,
+              status: 'error',
+              error: `Failed to load Google results page ${pageIndex + 1}: ${navigationError.message}`,
+              ranAt
+            };
+          }
+          await delay(75);
+          continue;
+        }
+
+        googleCommitted = true;
+        try {
+          latestScan = (await wc.executeJavaScript(buildGoogleResultScanScript(targetHost))) as GoogleResultScan;
+        } catch {
+          // Chromium may replace the document between navigation commit and
+          // the first rendered result. This is transient, not a failed SEO
+          // run. Retry aggressively until result anchors become available.
+          await delay(80);
+          continue;
         }
 
         if (latestScan.blocked) {
@@ -559,7 +588,19 @@ export class BrowserManager extends EventEmitter {
 
         pageMaxScanned = Math.max(pageMaxScanned, latestScan.resultsScanned);
         if (latestScan.match) break;
-        await delay(latestScan.ready ? 600 : 350);
+
+        // Once any result markup exists, check essentially in real time.
+        // Do not wait for document.readyState === complete.
+        await delay(latestScan.ready ? 100 : 80);
+      }
+
+      if (!googleCommitted && navigationError) {
+        return {
+          browserId: id,
+          status: 'error',
+          error: `Failed to load Google results page ${pageIndex + 1}: ${navigationError.message}`,
+          ranAt
+        };
       }
 
       totalScanned += pageMaxScanned;
@@ -897,6 +938,15 @@ export function buildKeepAliveActionScript(allowHop: boolean): string {
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isGoogleSearchResultsUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    return /(^|\.)google\.[a-z.]+$/i.test(parsed.hostname) && parsed.pathname === '/search';
+  } catch {
+    return false;
+  }
 }
 
 interface GoogleResultScan {
