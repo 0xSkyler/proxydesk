@@ -16,7 +16,7 @@ let proxyManager: ProxyManager;
 let automationManager: SeoAutomationManager;
 let activeBrowserCount = 10;
 
-async function createWindow(): Promise<void> {
+async function createWindowShell(): Promise<void> {
   mainWindow = new BrowserWindow({
     width: 1600,
     height: 1000,
@@ -24,6 +24,7 @@ async function createWindow(): Promise<void> {
     minHeight: 720,
     backgroundColor: '#0f1115',
     title: 'ProxyDesk SEO Tracker Lite',
+    show: false,
     webPreferences: {
       preload: path.join(__dirname, '../preload/preload.js'),
       contextIsolation: true,
@@ -35,15 +36,19 @@ async function createWindow(): Promise<void> {
 
   browserManager.attachWindow(mainWindow);
 
+  mainWindow.on('closed', () => {
+    mainWindow = null;
+  });
+}
+
+async function loadRenderer(): Promise<void> {
+  if (!mainWindow) throw new Error('Main window is not available.');
   if (isDev) {
     await mainWindow.loadURL('http://localhost:5173');
   } else {
     await mainWindow.loadFile(path.join(__dirname, '../renderer/index.html'));
   }
-
-  mainWindow.on('closed', () => {
-    mainWindow = null;
-  });
+  mainWindow.show();
 }
 
 async function ensureBrowserCount(count: number): Promise<number[]> {
@@ -91,15 +96,16 @@ async function bootstrap(): Promise<void> {
     automationManager
   });
 
-  await createWindow();
-
-  // Browser shells are created concurrently and stay blank until a validated
-  // proxy is assigned. This removes ten unnecessary Google loads at startup.
+  // Build the native shell first, create blank isolated browser sessions,
+  // and only then show React. This removes the startup race where the user
+  // could click Start while browser creation was still in flight.
+  await createWindowShell();
   await ensureBrowserCount(activeBrowserCount);
 
   // Keep Alive is automatic after a matched Google result.
   browserManager.configureKeepAlive(60_000, 25, true);
 
+  await loadRenderer();
   logger.info('application', 'ProxyDesk SEO Tracker Lite ready.');
 }
 
@@ -111,7 +117,12 @@ app.whenReady().then(() => {
   });
 
   app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) void createWindow();
+    if (BrowserWindow.getAllWindows().length === 0) {
+      void (async () => {
+        await createWindowShell();
+        await loadRenderer();
+      })();
+    }
   });
 });
 
