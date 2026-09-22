@@ -243,7 +243,7 @@ describe('SeoAutomationManager continuous measurement', () => {
     manager.stop();
   });
 
-  it('rejects production appareldiary.com as an autonomous controlled-test host', async () => {
+  it('requires an explicitly designated test/staging/dev host for autonomous interaction', async () => {
     const manager = new SeoAutomationManager(
       { cancelCurrentValidation() {}, resetRotationHistory() {} } as unknown as ProxyManager,
       {} as BrowserManager,
@@ -253,13 +253,13 @@ describe('SeoAutomationManager continuous measurement', () => {
     await expect(
       manager.start({
         query: 'rmg cutting',
-        targetWebsite: 'appareldiary.com',
-        controlledTestHost: 'appareldiary.com',
+        targetWebsite: 'example.com',
+        controlledTestHost: 'example.com',
         intervalSec: 600,
         browserCount: 1,
         maxPages: 20
       })
-    ).rejects.toThrow(/production host/i);
+    ).rejects.toThrow(/test\/staging\/dev host/i);
   });
 
   it('clicks and starts controlled Keep Alive only for an exact test-host match', async () => {
