@@ -242,4 +242,116 @@ describe('SeoAutomationManager continuous measurement', () => {
 
     manager.stop();
   });
+
+  it('rejects production appareldiary.com as an autonomous controlled-test host', async () => {
+    const manager = new SeoAutomationManager(
+      { cancelCurrentValidation() {}, resetRotationHistory() {} } as unknown as ProxyManager,
+      {} as BrowserManager,
+      async () => [1]
+    );
+
+    await expect(
+      manager.start({
+        query: 'rmg cutting',
+        targetWebsite: 'appareldiary.com',
+        controlledTestHost: 'appareldiary.com',
+        intervalSec: 600,
+        browserCount: 1,
+        maxPages: 20
+      })
+    ).rejects.toThrow(/production host/i);
+  });
+
+  it('clicks and starts controlled Keep Alive only for an exact test-host match', async () => {
+    const controlledHost = 'seo-test.appareldiary.com';
+    const proxy = makeProxy('controlled');
+    const tokens = new Map<number, number>();
+    const events: string[] = [];
+
+    const proxyManager = {
+      cancelCurrentValidation() {},
+      resetRotationHistory() {},
+      async fetchValidateAssignStreaming(
+        browserIds: number[],
+        onAssignment: (assignment: { browserId: number; proxy: ProxyRecord }) => void
+      ): Promise<ReloadProxiesSummary> {
+        onAssignment({ browserId: browserIds[0], proxy });
+        return {
+          found: 1,
+          countryMatched: 1,
+          working: 1,
+          assignments: [{ browserId: browserIds[0], proxy }]
+        };
+      }
+    } as unknown as ProxyManager;
+
+    const browserManager = {
+      async assignProxy() {},
+      setBrowserKeepAlive(_id: number, enabled: boolean) {
+        events.push(enabled ? 'manual-keepalive-on' : 'manual-keepalive-off');
+      },
+      cancelMeasurementSession(id: number) {
+        tokens.set(id, (tokens.get(id) ?? 0) + 1);
+      },
+      startMeasurementSession(id: number) {
+        const token = (tokens.get(id) ?? 0) + 1;
+        tokens.set(id, token);
+        return token;
+      },
+      isMeasurementSessionCurrent(id: number, token: number) {
+        return tokens.get(id) === token;
+      },
+      async broadcastSearch(id: number): Promise<BroadcastSearchResult> {
+        return {
+          browserId: id,
+          status: 'matched',
+          landedUrl: 'https://www.google.com/search?q=rmg+cutting',
+          matchedUrl: `https://${controlledHost}/article/rmg-cutting`,
+          matchedTitle: 'RMG Cutting Process',
+          monitoring: true,
+          ranAt: new Date().toISOString()
+        };
+      },
+      async clickControlledGoogleResult(
+        _id: number,
+        _query: string,
+        host: string,
+        url: string
+      ) {
+        events.push(`click:${host}:${url}`);
+        return true;
+      },
+      startControlledKeepAlive(_id: number, host: string) {
+        events.push(`controlled-keepalive:${host}`);
+      },
+      async waitForGoogleRecovery() {
+        return true;
+      }
+    } as unknown as BrowserManager;
+
+    const manager = new SeoAutomationManager(proxyManager, browserManager, async () => [1]);
+
+    const observed = new Promise<void>((resolve) => {
+      manager.on('seoResult', ({ result }) => {
+        if (result.status === 'matched') resolve();
+      });
+    });
+
+    await manager.start({
+      query: 'rmg cutting',
+      targetWebsite: controlledHost,
+      controlledTestHost: controlledHost,
+      intervalSec: 600,
+      browserCount: 1,
+      maxPages: 20
+    });
+
+    await observed;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(events.some((event) => event.startsWith('click:seo-test.appareldiary.com:'))).toBe(true);
+    expect(events).toContain('controlled-keepalive:seo-test.appareldiary.com');
+
+    manager.stop();
+  });
 });
