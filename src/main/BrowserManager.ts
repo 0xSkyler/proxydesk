@@ -853,31 +853,34 @@ export class BrowserManager extends EventEmitter {
       if (matchHost !== normalizedHost) return false;
 
       const point = scan.match.clickPoint;
+      let clickDispatched = false;
       if (point && Number.isFinite(point.x) && Number.isFinite(point.y)) {
         const x = Math.max(1, Math.round(point.x));
         const y = Math.max(1, Math.round(point.y));
         wc.sendInputEvent({ type: 'mouseMove', x, y });
         wc.sendInputEvent({ type: 'mouseDown', x, y, button: 'left', clickCount: 1 });
         wc.sendInputEvent({ type: 'mouseUp', x, y, button: 'left', clickCount: 1 });
+        clickDispatched = true;
       } else {
-        const clicked = (await wc.executeJavaScript(
+        clickDispatched = (await wc.executeJavaScript(
           buildClickGoogleTargetResultScript(normalizedHost, query),
           true
-        )) as boolean;
-        if (!clicked) return false;
+        ).catch(() => false)) as boolean;
       }
 
-      const deadline = Date.now() + 8_000;
-      while (Date.now() < deadline) {
-        if (!this.isMeasurementSessionCurrent(id, measurementToken)) return false;
-        const current = wc.getURL();
-        try {
-          const host = new URL(current).hostname.toLowerCase().replace(/^www\./, '').replace(/\.$/, '');
-          if (host === normalizedHost) return true;
-        } catch {
-          // Keep waiting through transient navigation URLs.
+      if (clickDispatched) {
+        const deadline = Date.now() + 5_000;
+        while (Date.now() < deadline) {
+          if (!this.isMeasurementSessionCurrent(id, measurementToken)) return false;
+          const current = wc.getURL();
+          try {
+            const host = new URL(current).hostname.toLowerCase().replace(/^www\./, '').replace(/\.$/, '');
+            if (host === normalizedHost) return true;
+          } catch {
+            // Keep waiting through transient navigation URLs.
+          }
+          await delay(100);
         }
-        await delay(100);
       }
 
       // One DOM-level retry is allowed if the native event was ignored.
