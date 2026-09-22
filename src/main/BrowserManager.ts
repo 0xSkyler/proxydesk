@@ -1057,7 +1057,14 @@ export function buildKeepAliveActionScript(allowHop: boolean, visitedUrls: strin
 
         // Favor article-looking links, but keep a same-site content fallback.
         var score = 0;
-        if (/\\/(article|blog|post|news|story)\\//i.test(url.pathname)) score += 100;
+        const lowerPath = url.pathname.toLowerCase();
+        if (
+          lowerPath.includes('/article/') ||
+          lowerPath.includes('/blog/') ||
+          lowerPath.includes('/post/') ||
+          lowerPath.includes('/news/') ||
+          lowerPath.includes('/story/')
+        ) score += 100;
         if (anchor.closest && anchor.closest('article')) score += 80;
         if (anchor.querySelector && anchor.querySelector('h1,h2,h3,h4')) score += 60;
         if (text.length >= 20) score += 30;
