@@ -15,49 +15,6 @@ import type { BrowserManager } from './BrowserManager';
 import type { ProxyManager } from './ProxyManager';
 import { logger } from './Logger';
 
-export function isControlledTestHost(host: string): boolean {
-  const normalized = normalizeTargetHost(host);
-  if (!normalized) return false;
-
-  if (
-    normalized === 'localhost' ||
-    normalized.endsWith('.localhost') ||
-    /^127(?:\.\d{1,3}){3}$/.test(normalized) ||
-    /^10(?:\.\d{1,3}){3}$/.test(normalized) ||
-    /^192\.168(?:\.\d{1,3}){2}$/.test(normalized) ||
-    /^172\.(?:1[6-9]|2\d|3[01])(?:\.\d{1,3}){2}$/.test(normalized)
-  ) {
-    return true;
-  }
-
-  const labels = normalized.split('.');
-  if (labels.length < 3) return false;
-
-  const testLabels = new Set([
-    'test',
-    'testing',
-    'staging',
-    'stage',
-    'stg',
-    'qa',
-    'dev',
-    'development',
-    'sandbox',
-    'preview',
-    'demo',
-    'lab',
-    'labs'
-  ]);
-
-  return labels.slice(0, -2).some((label) => {
-    if (testLabels.has(label)) return true;
-    return label
-      .split('-')
-      .filter(Boolean)
-      .some((part) => testLabels.has(part));
-  });
-}
-
 // eslint-disable-next-line @typescript-eslint/no-unsafe-declaration-merging
 export declare interface SeoAutomationManager {
   on(event: 'stateChanged', listener: (state: SeoAutomationState) => void): this;
@@ -71,7 +28,7 @@ export declare interface SeoAutomationManager {
  *
  * ProxyScrape free API -> local validation -> immediate exclusive assignment
  * -> continuous Google monitoring -> challenge pause/resume
- * -> optional controlled-test result click -> repeating same-host Keep Alive
+ * -> exact-host result click -> repeating same-host Keep Alive
  * -> rotate and restart on the user-configured cadence.
  */
 // eslint-disable-next-line @typescript-eslint/no-unsafe-declaration-merging
@@ -118,19 +75,16 @@ export class SeoAutomationManager extends EventEmitter {
     const query = config.query.trim();
     const targetWebsite = config.targetWebsite.trim();
     const targetHost = normalizeTargetHost(targetWebsite);
-    const controlledTestHost = normalizeTargetHost(config.controlledTestHost ?? '');
+    const requestedInteractionHost = normalizeTargetHost(config.controlledTestHost ?? '');
     if (!query) throw new Error('Enter a Google search keyword.');
     if (!targetHost) throw new Error('Enter a valid target website or site name.');
 
-    if (controlledTestHost) {
-      if (controlledTestHost !== targetHost) {
-        throw new Error('Controlled test host must exactly match the Target website host.');
-      }
-      if (!isControlledTestHost(controlledTestHost)) {
-        throw new Error(
-          'Autonomous click + Keep Alive requires a clearly designated test/staging/dev host, localhost, or a private test address.'
-        );
-      }
+    // Target website is the interaction host by default. An explicit override
+    // is allowed only when it resolves to the exact same hostname, so result
+    // opening and Keep Alive can never drift to a different site.
+    const controlledTestHost = requestedInteractionHost || targetHost;
+    if (controlledTestHost !== targetHost) {
+      throw new Error('Interaction host must exactly match the Target website host.');
     }
 
     const browserCount = normalizeBrowserCount(config.browserCount);
@@ -464,13 +418,7 @@ export class SeoAutomationManager extends EventEmitter {
         return;
       }
 
-      this.emit('seoResult', { cycleNumber, result });
-
-      if (
-        result.status === 'matched' &&
-        controlledTestHost &&
-        result.matchedUrl
-      ) {
+      if (result.status === 'matched' && result.matchedUrl) {
         let matchedHost = '';
         try {
           matchedHost = new URL(result.matchedUrl).hostname
@@ -481,21 +429,62 @@ export class SeoAutomationManager extends EventEmitter {
           matchedHost = '';
         }
 
-        if (matchedHost === controlledTestHost) {
-          const clicked = await this.browserManager.clickControlledGoogleResult(
-            browserId,
-            query,
-            controlledTestHost,
-            result.matchedUrl,
-            measurementToken
-          );
-
-          if (clicked) {
-            this.browserManager.startControlledKeepAlive(browserId, controlledTestHost);
-            return;
-          }
+        if (matchedHost !== controlledTestHost) {
+          this.emit('seoResult', {
+            cycleNumber,
+            result: {
+              ...result,
+              interactionStatus: 'click-failed',
+              error: `Matched result host ${matchedHost || 'unknown'} does not equal configured interaction host ${controlledTestHost}.`
+            }
+          });
+          await sleep(3_000);
+          continue;
         }
+
+        this.emit('seoResult', {
+          cycleNumber,
+          result: {
+            ...result,
+            interactionStatus: 'opening'
+          }
+        });
+
+        const clicked = await this.browserManager.clickControlledGoogleResult(
+          browserId,
+          query,
+          controlledTestHost,
+          result.matchedUrl,
+          measurementToken
+        );
+
+        if (clicked) {
+          this.browserManager.startControlledKeepAlive(browserId, controlledTestHost);
+          this.emit('seoResult', {
+            cycleNumber,
+            result: {
+              ...result,
+              landedUrl: result.matchedUrl,
+              interactionStatus: 'opened',
+              keepAliveStarted: true
+            }
+          });
+          return;
+        }
+
+        this.emit('seoResult', {
+          cycleNumber,
+          result: {
+            ...result,
+            interactionStatus: 'click-failed',
+            error: 'Target was detected, but the result could not be opened. ProxyDesk will retry in this session.'
+          }
+        });
+        await sleep(3_000);
+        continue;
       }
+
+      this.emit('seoResult', { cycleNumber, result });
 
       if (result.status === 'paused') {
         // Keep the same browser, proxy, cookies, and Google session. We do not
