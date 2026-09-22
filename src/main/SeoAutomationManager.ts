@@ -418,6 +418,31 @@ export class SeoAutomationManager extends EventEmitter {
         return;
       }
 
+      if (
+        result.status === 'matched' &&
+        result.interactionStatus === 'opened' &&
+        result.matchedUrl
+      ) {
+        this.browserManager.startControlledKeepAlive(browserId, controlledTestHost);
+        this.emit('seoResult', {
+          cycleNumber,
+          result: {
+            ...result,
+            keepAliveStarted: true
+          }
+        });
+        return;
+      }
+
+      if (
+        result.status === 'matched' &&
+        result.interactionStatus === 'click-failed'
+      ) {
+        this.emit('seoResult', { cycleNumber, result });
+        await sleep(3_000);
+        continue;
+      }
+
       if (result.status === 'matched' && result.matchedUrl) {
         let matchedHost = '';
         try {
