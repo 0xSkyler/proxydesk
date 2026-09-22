@@ -84,7 +84,7 @@ export function SeoTrackerPanel(): JSX.Element {
           <h1>ProxyDesk SEO Tracker Lite</h1>
           <p>
             ProxyScrape API → validation → Google monitoring → challenge pause/resume →
-            controlled test click → 2-scroll article hopping → rotation.
+            exact-host result opening → 2-scroll article hopping → rotation.
           </p>
         </div>
         <span className={running || starting ? 'tracker-pill tracker-pill--on' : 'tracker-pill'}>
@@ -118,12 +118,12 @@ export function SeoTrackerPanel(): JSX.Element {
         </label>
 
         <label>
-          Controlled test host
+          Interaction host (optional)
           <input
             value={controlledTestHost}
             disabled={running}
             onChange={(event) => setControlledTestHost(event.target.value)}
-            placeholder="seo-test.appareldiary.com"
+            placeholder="Leave blank to use Target website"
           />
         </label>
 
@@ -203,10 +203,10 @@ export function SeoTrackerPanel(): JSX.Element {
       <div className="tracker-note">
         Each proxy session continuously monitors the saved keyword + website. Google
         challenges pause the monitor instead of ending it; when normal results return in
-        the same session, scanning resumes. Auto-click and article hopping are enabled only
-        when the detected result hostname exactly matches the Controlled test host. The
-        production root remains measurement-only. Browser sessions are isolated in memory
-        and start fresh after every app restart.
+        the same session, scanning resumes. The Target website is the interaction host by
+        default. A matched result must either open that exact host and start Keep Alive, or
+        report an explicit click failure. Browser sessions are isolated in memory and start
+        fresh after every app restart.
       </div>
 
       <div className="tracker-results">
@@ -219,6 +219,7 @@ export function SeoTrackerPanel(): JSX.Element {
               <th>Status</th>
               <th>Google page</th>
               <th>Article</th>
+              <th>Action</th>
               <th>Keep Alive</th>
             </tr>
           </thead>
@@ -238,13 +239,16 @@ export function SeoTrackerPanel(): JSX.Element {
                   <td title={result.matchedUrl ?? result.landedUrl}>
                     {result.matchedTitle ?? result.matchedUrl ?? result.landedUrl ?? '—'}
                   </td>
-                  <td>{browser?.keepAliveEnabled ? 'Active' : 'Idle'}</td>
+                  <td className={result.interactionStatus === 'click-failed' ? 'status-bad' : result.interactionStatus === 'opened' ? 'status-ok' : ''}>
+                    {result.interactionStatus ?? (result.status === 'matched' ? 'detected' : '—')}
+                  </td>
+                  <td>{browser?.keepAliveEnabled || result.keepAliveStarted ? 'Active' : 'Idle'}</td>
                 </tr>
               );
             })}
             {resultRows.length === 0 && (
               <tr>
-                <td colSpan={6} className="muted">No completed browser searches yet.</td>
+                <td colSpan={7} className="muted">No completed browser searches yet.</td>
               </tr>
             )}
           </tbody>
