@@ -486,22 +486,12 @@ export class BrowserManager extends EventEmitter {
   }
 
   /**
-   * Runs one browser's search-and-open workflow: load a Google results
-   * page for `query`, scan the organic results for one whose title or
-   * surrounding text contains `matchText`, and if found, navigate that
-   * browser to it. Used to fan the same (or a per-browser) search out
-   * across every workspace from one central command — each browser uses
-   * its own assigned proxy, so this naturally surfaces region-specific
-   * results too.
+   * Runs one browser's measurement-only Google scan. It loads result pages,
+   * watches progressively-rendered organic results, and records a target
+   * match without clicking it. Challenge pages are reported as a paused
+   * observation so the session monitor can wait for normal results to return.
    *
-   * This reads the results page's DOM once and never clicks anything
-   * automatically beyond the single matched link — it does not click
-   * through multiple results, does not repeat searches, and leaves the
-   * browser exactly where a person doing the same search by hand would
-   * end up. Google's result markup changes over time and this browser's
-   * proxy may get an interstitial ("unusual traffic") page instead of
-   * results — both are reported back as a distinct status rather than
-   * silently failing or guessing.
+   * This keeps SEO measurement separate from generated site engagement.
    */
   async broadcastSearch(
     id: number,
@@ -587,8 +577,9 @@ export class BrowserManager extends EventEmitter {
       if (extractGoogleBlockContinueUrl(currentUrl)) {
         return {
           browserId: id,
-          status: 'blocked',
+          status: 'paused',
           landedUrl: currentUrl,
+          monitoring: true,
           resultsScanned: totalScanned,
           ranAt
         };
@@ -651,8 +642,9 @@ export class BrowserManager extends EventEmitter {
         if (scan.blocked) {
           return {
             browserId: id,
-            status: 'blocked',
+            status: 'paused',
             landedUrl: wc.getURL(),
+            monitoring: true,
             resultsScanned: totalScanned,
             ranAt
           };
@@ -694,95 +686,17 @@ export class BrowserManager extends EventEmitter {
         continue;
       }
 
-      let clicked = false;
-      const point = scan.match.clickPoint;
-      if (point && Number.isFinite(point.x) && Number.isFinite(point.y)) {
-        const x = Math.max(1, Math.round(point.x));
-        const y = Math.max(1, Math.round(point.y));
-        wc.sendInputEvent({ type: 'mouseMove', x, y });
-        wc.sendInputEvent({ type: 'mouseDown', x, y, button: 'left', clickCount: 1 });
-        wc.sendInputEvent({ type: 'mouseUp', x, y, button: 'left', clickCount: 1 });
-        clicked = true;
-      }
-
-      if (!clicked) {
-        clicked = (await wc
-          .executeJavaScript(buildClickGoogleTargetResultScript(targetHost, query), true)
-          .catch(() => false)) as boolean;
-      }
-
-      if (!clicked) {
-        return {
-          browserId: id,
-          status: 'error',
-          error: `Found "${scan.match.title}" on Google page ${pageIndex + 1}, but could not click it.`,
-          landedUrl: wc.getURL(),
-          resultsScanned: totalScanned,
-          ranAt
-        };
-      }
-
-      const verificationTarget = normalizeTargetHost(scan.match.url) || targetHost;
-      const landingDeadline = Date.now() + 8_000;
-      let landedUrl = wc.getURL();
-
-      while (Date.now() < landingDeadline) {
-        await delay(80);
-        landedUrl = wc.getURL();
-        if (hostMatchesTarget(landedUrl, verificationTarget)) break;
-      }
-
-      // If Google's click handler ignored the synthetic/native click, follow
-      // the exact URL extracted from that matched Google result. We never
-      // construct or guess a target URL.
-      if (!hostMatchesTarget(landedUrl, verificationTarget) && isGoogleSearchResultsUrl(landedUrl)) {
-        try {
-          await wc.executeJavaScript(
-            `location.assign(${JSON.stringify(scan.match.url)})`,
-            true
-          );
-        } catch {
-          // The navigation can destroy the execution context; continue below.
-        }
-
-        const fallbackDeadline = Date.now() + 5_000;
-        while (Date.now() < fallbackDeadline) {
-          await delay(80);
-          landedUrl = wc.getURL();
-          if (hostMatchesTarget(landedUrl, verificationTarget)) break;
-        }
-      }
-
-      if (!hostMatchesTarget(landedUrl, verificationTarget)) {
-        return {
-          browserId: id,
-          status: 'error',
-          error: `Matched the Google result but did not land on ${verificationTarget}.`,
-          landedUrl,
-          matchedTitle: scan.match.title,
-          resultsScanned: totalScanned,
-          position: pageIndex * 10 + scan.match.organicIndex + 1,
-          resultPage: pageIndex + 1,
-          ranAt
-        };
-      }
-
-      // Keep Alive should not wait on a slow article load either. Allow the
-      // article DOM a moment to render, then stop remaining resources.
-      const articleDeadline = Date.now() + 1_200;
-      while (wc.isLoading() && Date.now() < articleDeadline) await delay(50);
-      if (wc.isLoading()) wc.stop();
-
-      this.setBrowserKeepAlive(id, true, true);
       return {
         browserId: id,
         status: 'matched',
-        landedUrl,
+        landedUrl: wc.getURL(),
+        matchedUrl: scan.match.url,
         matchedTitle: scan.match.title,
         resultsScanned: totalScanned,
         position: pageIndex * 10 + scan.match.organicIndex + 1,
         resultPage: pageIndex + 1,
-        keepAliveStarted: true,
+        monitoring: true,
+        keepAliveStarted: false,
         ranAt
       };
     }
@@ -792,8 +706,48 @@ export class BrowserManager extends EventEmitter {
       status: 'no-match',
       landedUrl: lastSearchUrl || wc.getURL(),
       resultsScanned: totalScanned,
+      monitoring: true,
       ranAt
     };
+  }
+
+  async waitForGoogleRecovery(id: number, maxWaitMs: number): Promise<boolean> {
+    const managed = this.get(id);
+    const wc = managed.view.webContents;
+    const deadline = Date.now() + Math.max(1_000, maxWaitMs);
+
+    while (Date.now() < deadline) {
+      if (wc.isDestroyed()) return false;
+
+      const url = wc.getURL();
+      if (isGoogleSearchResultsUrl(url)) {
+        try {
+          const state = (await Promise.race([
+            wc.executeJavaScript(`(function() {
+              var text = (document.body && document.body.innerText) || '';
+              var blocked =
+                /unusual traffic|not a robot|recaptcha|verify you are human/i.test(text.slice(0, 5000)) ||
+                /\\/sorry\\/|consent\\.google\\./i.test(location.href);
+              var hasResults = Boolean(
+                document.querySelector('#search') ||
+                document.querySelector('#rso') ||
+                document.querySelector('main')
+              );
+              return { blocked: blocked, hasResults: hasResults };
+            })()`, true),
+            delay(500).then(() => null)
+          ])) as { blocked?: boolean; hasResults?: boolean } | null;
+
+          if (state && !state.blocked && state.hasResults) return true;
+        } catch {
+          // Navigation may still be replacing the challenge document.
+        }
+      }
+
+      await delay(1_000);
+    }
+
+    return false;
   }
 
   async destroyBrowser(id: number): Promise<void> {
