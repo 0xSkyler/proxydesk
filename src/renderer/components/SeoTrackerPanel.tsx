@@ -10,6 +10,7 @@ export function SeoTrackerPanel(): JSX.Element {
 
   const [query, setQuery] = useState('');
   const [targetWebsite, setTargetWebsite] = useState('');
+  const [controlledTestHost, setControlledTestHost] = useState('');
   const [intervalSec, setIntervalSec] = useState(600);
   const [browserCount, setBrowserCount] = useState(10);
   const [maxPages, setMaxPages] = useState(20);
@@ -19,6 +20,7 @@ export function SeoTrackerPanel(): JSX.Element {
     if (!automation) return;
     if (automation.query) setQuery(automation.query);
     if (automation.targetWebsite) setTargetWebsite(automation.targetWebsite);
+    setControlledTestHost(automation.controlledTestHost ?? '');
     setIntervalSec(automation.intervalSec);
     setBrowserCount(automation.browserCount);
     setMaxPages(automation.maxPages);
@@ -48,6 +50,7 @@ export function SeoTrackerPanel(): JSX.Element {
       await window.app.automation.start({
         query: query.trim(),
         targetWebsite: targetWebsite.trim(),
+        controlledTestHost: controlledTestHost.trim() || undefined,
         intervalSec,
         browserCount,
         maxPages
@@ -80,8 +83,8 @@ export function SeoTrackerPanel(): JSX.Element {
         <div>
           <h1>ProxyDesk SEO Tracker Lite</h1>
           <p>
-            ProxyScrape API → validation → live proxy assignment → continuous Google monitoring →
-            challenge pause/resume → rotation.
+            ProxyScrape API → validation → Google monitoring → challenge pause/resume →
+            controlled test click → 2-scroll article hopping → rotation.
           </p>
         </div>
         <span className={running || starting ? 'tracker-pill tracker-pill--on' : 'tracker-pill'}>
@@ -110,7 +113,17 @@ export function SeoTrackerPanel(): JSX.Element {
             value={targetWebsite}
             disabled={running}
             onChange={(event) => setTargetWebsite(event.target.value)}
-            placeholder="appareldiary.com"
+            placeholder="seo-test.appareldiary.com"
+          />
+        </label>
+
+        <label>
+          Controlled test host
+          <input
+            value={controlledTestHost}
+            disabled={running}
+            onChange={(event) => setControlledTestHost(event.target.value)}
+            placeholder="seo-test.appareldiary.com"
           />
         </label>
 
@@ -188,11 +201,12 @@ export function SeoTrackerPanel(): JSX.Element {
       )}
 
       <div className="tracker-note">
-        Each proxy session continuously measures the saved keyword + website. Google
-        challenges pause the monitor instead of ending it; if normal results return in the
-        same session, measurement resumes automatically. A detected target is recorded but
-        not opened automatically. Keep Alive is a manual two-scroll inspection control.
-        Browser sessions are isolated in memory and start fresh after every app restart.
+        Each proxy session continuously monitors the saved keyword + website. Google
+        challenges pause the monitor instead of ending it; when normal results return in
+        the same session, scanning resumes. Auto-click and article hopping are enabled only
+        when the detected result hostname exactly matches the Controlled test host. The
+        production root remains measurement-only. Browser sessions are isolated in memory
+        and start fresh after every app restart.
       </div>
 
       <div className="tracker-results">
@@ -224,7 +238,7 @@ export function SeoTrackerPanel(): JSX.Element {
                   <td title={result.matchedUrl ?? result.landedUrl}>
                     {result.matchedTitle ?? result.matchedUrl ?? result.landedUrl ?? '—'}
                   </td>
-                  <td>Manual</td>
+                  <td>{browser?.keepAliveEnabled ? 'Active' : 'Idle'}</td>
                 </tr>
               );
             })}
