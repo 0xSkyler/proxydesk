@@ -65,6 +65,20 @@ export function BrowserPanel({ id }: Props): JSX.Element {
         <span className={browser.keepAliveEnabled ? 'status-ok' : 'muted'}>
           {browser.keepAliveEnabled ? 'Keep Alive active' : 'Keep Alive idle'}
         </span>
+        <button
+          className="browser-keepalive-button"
+          disabled={browser.keepAliveEnabled}
+          onClick={() => void window.app.browser.setKeepAlive(id, true)}
+        >
+          Start Keep Alive
+        </button>
+        <button
+          className="browser-keepalive-button"
+          disabled={!browser.keepAliveEnabled}
+          onClick={() => void window.app.browser.setKeepAlive(id, false)}
+        >
+          Stop
+        </button>
       </div>
 
       <div className="browser-card__viewport" ref={viewportRef} />
