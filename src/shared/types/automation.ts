@@ -3,6 +3,8 @@ import type { BroadcastSearchResult } from './browser';
 export interface SeoAutomationConfig {
   query: string;
   targetWebsite: string;
+  /** Exact hostname allowed for autonomous click + Keep Alive in controlled testing. */
+  controlledTestHost?: string;
   /** How often a new ProxyScrape fetch + validation + proxy rotation begins. */
   intervalSec: number;
   /** Number of isolated browser workspaces, 1-100. */
@@ -17,6 +19,7 @@ export interface SeoAutomationState {
   proxySource: 'ProxyScrape Free API';
   query: string;
   targetWebsite: string;
+  controlledTestHost?: string;
   intervalSec: number;
   browserCount: number;
   maxPages: number;
