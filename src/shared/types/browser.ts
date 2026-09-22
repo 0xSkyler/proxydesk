@@ -51,6 +51,8 @@ export interface BroadcastSearchResult {
   matchedUrl?: string;
   /** True when this is a continuing observation rather than a terminal run. */
   monitoring?: boolean;
+  /** Post-detection interaction state for the matched result. */
+  interactionStatus?: 'detected' | 'opening' | 'opened' | 'click-failed';
   /** How many organic results were scanned before finding a match (or not). */
   resultsScanned?: number;
   position?: number;
