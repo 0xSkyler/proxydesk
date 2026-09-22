@@ -49,7 +49,13 @@ export function isControlledTestHost(host: string): boolean {
     'labs'
   ]);
 
-  return labels.slice(0, -2).some((label) => testLabels.has(label));
+  return labels.slice(0, -2).some((label) => {
+    if (testLabels.has(label)) return true;
+    return label
+      .split('-')
+      .filter(Boolean)
+      .some((part) => testLabels.has(part));
+  });
 }
 
 // eslint-disable-next-line @typescript-eslint/no-unsafe-declaration-merging
