@@ -615,7 +615,7 @@ export class BrowserManager extends EventEmitter {
       while (Date.now() < scanDeadline) {
         try {
           scan = (await wc.executeJavaScript(
-            buildGoogleResultScanScript(targetHost),
+            buildGoogleResultScanScript(targetHost, query),
             true
           )) as GoogleResultScan;
         } catch {
@@ -681,7 +681,7 @@ export class BrowserManager extends EventEmitter {
 
       if (!clicked) {
         clicked = (await wc
-          .executeJavaScript(buildClickGoogleTargetResultScript(targetHost), true)
+          .executeJavaScript(buildClickGoogleTargetResultScript(targetHost, query), true)
           .catch(() => false)) as boolean;
       }
 
@@ -1067,10 +1067,11 @@ interface GoogleResultScan {
   };
 }
 
-export function buildGoogleResultScanScript(targetHost: string): string {
+export function buildGoogleResultScanScript(targetHost: string, query = ''): string {
   return `(function() {
     try {
       var target = ${JSON.stringify(targetHost.toLowerCase())};
+      var queryText = ${JSON.stringify(query.toLowerCase())};
       var loc = window.location.href;
       if (/\\/sorry\\/|consent\\.google\\./.test(loc)) {
         return { blocked: true, ready: true, resultsScanned: 0, observedResults: 0, signature: '' };
@@ -1110,6 +1111,32 @@ export function buildGoogleResultScanScript(targetHost: string): string {
       }
 
       var displayMentionsTarget = ${resultTextMentionsHost.toString()};
+
+      function normalizeWords(text) {
+        return String(text || '')
+          .toLowerCase()
+          .replace(/www\\./g, '')
+          .replace(/[^a-z0-9]+/g, ' ')
+          .trim()
+          .replace(/\\s+/g, ' ');
+      }
+
+      var queryTokens = normalizeWords(queryText)
+        .split(' ')
+        .filter(function(token) { return token.length >= 2; });
+
+      function keywordMatches(text) {
+        if (!queryTokens.length) return true;
+        var normalized = ' ' + normalizeWords(text) + ' ';
+        return queryTokens.every(function(token) {
+          return normalized.indexOf(' ' + token + ' ') !== -1;
+        });
+      }
+
+      function websiteAndKeywordMatch(text) {
+        return displayMentionsTarget(text, target) && keywordMatches(text);
+      }
+
       var searchRoot = document.querySelector('#search') || document.querySelector('#rso') || document.querySelector('main') || document.body;
 
       function elementRect(node) {
@@ -1158,7 +1185,8 @@ export function buildGoogleResultScanScript(targetHost: string): string {
           var direct = destinationMatches(destination);
           var score = 0;
           if (hasHeading) score += 100;
-          if (direct) score += 40;
+          if (keywordMatches(text)) score += 120;
+          if (direct) score += 60;
           if (text.length >= 18 && !displayMentionsTarget(text, target)) score += 35;
           try {
             var parsedDestination = new URL(destination, location.href);
@@ -1207,6 +1235,98 @@ export function buildGoogleResultScanScript(targetHost: string): string {
       var observedResults = organicSnapshot.length;
       var signature = organicSnapshot.slice(0, 30).join('||');
       var resultsScanned = observedResults;
+
+      // TEXT-FIRST MATCHING:
+      // Google's visible domain line and blue title are not guaranteed to
+      // share the same <a> or stable class names. Start from nodes whose
+      // visible text contains the target website, climb to the smallest
+      // ancestor that also contains the search-keyword tokens, then choose
+      // the best article/title link inside that block.
+      var textCandidates = Array.prototype.slice.call(
+        searchRoot ? searchRoot.querySelectorAll('cite, span, div') : []
+      );
+      var bestTextMatch = null;
+
+      for (var t = 0; t < textCandidates.length; t += 1) {
+        var textNode = textCandidates[t];
+        var directText = (textNode.innerText || '').trim();
+        if (!displayMentionsTarget(directText, target)) continue;
+
+        var current = textNode;
+        for (var depth = 0; current && depth < 8; depth += 1, current = current.parentElement) {
+          if (!current.querySelectorAll) continue;
+          var blockText = ((current.innerText || '') + '').trim();
+          if (blockText.length < 12 || blockText.length > 3500) continue;
+          if (/\\bSponsored\\b/i.test(blockText.slice(0, 260))) break;
+          if (!websiteAndKeywordMatch(blockText)) continue;
+
+          var articleAnchor = bestAnchor(current, textNode.closest && textNode.closest('a[href]'));
+          if (!articleAnchor) continue;
+
+          var articleDestination = unwrap(articleAnchor.getAttribute('href') || articleAnchor.href || '');
+          if (!articleDestination || isGoogleDestination(articleDestination)) continue;
+
+          var articleTitleNode = articleAnchor.querySelector && articleAnchor.querySelector('h3');
+          var articleTitle = (
+            (articleTitleNode && articleTitleNode.innerText) ||
+            articleAnchor.getAttribute('aria-label') ||
+            articleAnchor.innerText ||
+            ''
+          ).trim();
+
+          // The keyword may live in the blue title or in the same result
+          // block/snippet. Requiring the full block to contain the tokens is
+          // what makes this resilient to Google's split title/domain markup.
+          if (!keywordMatches(blockText)) continue;
+
+          var articleRect = elementRect(articleAnchor);
+          if (!articleRect) continue;
+
+          var articleIndex = organicUrls.indexOf(articleDestination.split('#')[0]);
+          if (articleIndex < 0) articleIndex = 0;
+
+          var score = 0;
+          if (keywordMatches(articleTitle)) score += 200;
+          if (destinationMatches(articleDestination)) score += 120;
+          if (articleTitleNode) score += 80;
+          score -= Math.min(blockText.length, 3000) / 3000;
+
+          if (!bestTextMatch || score > bestTextMatch.score) {
+            bestTextMatch = {
+              score: score,
+              anchor: articleAnchor,
+              url: articleDestination,
+              title: articleTitle,
+              organicIndex: articleIndex
+            };
+          }
+          break;
+        }
+      }
+
+      if (bestTextMatch) {
+        bestTextMatch.anchor.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'auto' });
+        var bestRect = elementRect(bestTextMatch.anchor);
+        if (bestRect) {
+          return {
+            blocked: false,
+            ready: true,
+            resultsScanned: resultsScanned,
+            observedResults: observedResults,
+            signature: signature,
+            match: {
+              url: bestTextMatch.url,
+              title: bestTextMatch.title,
+              organicIndex: bestTextMatch.organicIndex,
+              clickPoint: {
+                x: bestRect.left + Math.min(bestRect.width / 2, Math.max(12, bestRect.width - 12)),
+                y: bestRect.top + bestRect.height / 2
+              }
+            }
+          };
+        }
+      }
+
       for (var i = 0; i < anchors.length; i += 1) {
         var seed = anchors[i];
         var destination = unwrap(seed.getAttribute('href') || seed.href || '');
@@ -1298,11 +1418,33 @@ export function buildGoogleResultScanScript(targetHost: string): string {
   })()`;
 }
 
-export function buildClickGoogleTargetResultScript(targetHost: string): string {
+export function buildClickGoogleTargetResultScript(targetHost: string, query = ''): string {
   return `(function() {
     try {
       var target = ${JSON.stringify(targetHost.toLowerCase())};
+      var queryText = ${JSON.stringify(query.toLowerCase())};
       var displayMentionsTarget = ${resultTextMentionsHost.toString()};
+
+      function normalizeWords(text) {
+        return String(text || '')
+          .toLowerCase()
+          .replace(/www\\./g, '')
+          .replace(/[^a-z0-9]+/g, ' ')
+          .trim()
+          .replace(/\\s+/g, ' ');
+      }
+
+      var queryTokens = normalizeWords(queryText)
+        .split(' ')
+        .filter(function(token) { return token.length >= 2; });
+
+      function keywordMatches(text) {
+        if (!queryTokens.length) return true;
+        var normalized = ' ' + normalizeWords(text) + ' ';
+        return queryTokens.every(function(token) {
+          return normalized.indexOf(' ' + token + ' ') !== -1;
+        });
+      }
 
       function unwrap(href) {
         try {
@@ -1345,7 +1487,7 @@ export function buildClickGoogleTargetResultScript(targetHost: string): string {
 
         var displayText = nearbyText.toLowerCase().replace(/www\\./g, '');
         var directMatch = destinationMatches(destination);
-        var textMatch = displayMentionsTarget(displayText, target);
+        var textMatch = displayMentionsTarget(displayText, target) && keywordMatches(nearbyText);
         if (!directMatch && !textMatch) continue;
 
         // Prefer the actual result-title/citation anchor. A visible target
