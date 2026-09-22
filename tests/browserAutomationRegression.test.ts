@@ -11,8 +11,10 @@ vi.mock('electron', () => ({
 
 import {
   BrowserManager,
+  buildClickGoogleLiveTargetObserverScript,
   buildEphemeralPartitionName,
   buildGoogleResultScanScript,
+  buildInstallGoogleLiveTargetObserverScript,
   buildKeepAliveActionScript
 } from '../src/main/BrowserManager';
 
@@ -335,85 +337,151 @@ describe('controlled test interaction', () => {
   });
 });
 
-describe('Google SEO measurement', () => {
-  it('recognizes visible website + keyword text when Google splits domain and title markup', () => {
-    const targetUrl = 'https://appareldiary.com/article/precision-and-profit-rmg-cutting';
-    const rect = { left: 48, top: 410, width: 720, height: 42, right: 768, bottom: 452 };
+describe('Google live-result observation', () => {
+  it('detects keyword + website in the live page watcher and clicks the stored result anchor', () => {
+    const targetUrl = 'https://appareldiary.com/article/rmg-cutting';
+    const clicked = vi.fn();
+    const disconnected = vi.fn();
 
     const card = {
       innerText:
-        'appareldiary.com\nhttps://appareldiary.com › article › precision-and-profit-a...\n' +
-        'RMG Cutting Process: A Stage-by-Stage Control Guide\n' +
+        'appareldiary.com\nRMG Cutting Process: A Stage-by-Stage Control Guide\n' +
         'The RMG cutting process operates on 60–70%.',
-      parentElement: null,
-      querySelectorAll: (selector: string) => (selector === 'a[href]' ? [titleAnchor] : [])
+      parentElement: null
     };
 
-    const titleAnchor = {
+    const anchor = {
       href: targetUrl,
       innerText: 'RMG Cutting Process: A Stage-by-Stage Control Guide',
-      getAttribute: (name: string) => (name === 'href' ? targetUrl : null),
+      parentElement: card,
+      target: '',
+      getAttribute: (name: string) => {
+        if (name === 'href') return targetUrl;
+        if (name === 'aria-label') return null;
+        return null;
+      },
       querySelector: (selector: string) =>
-        selector === 'h3' ? { innerText: 'RMG Cutting Process: A Stage-by-Stage Control Guide' } : null,
-      closest: () => card,
-      parentElement: card,
-      getBoundingClientRect: () => rect,
-      scrollIntoView: vi.fn()
-    };
-
-    const domainNode = {
-      innerText: 'appareldiary.com',
-      parentElement: card,
-      closest: (selector: string) => (selector === 'a[href]' ? null : card)
+        selector === 'h3'
+          ? { innerText: 'RMG Cutting Process: A Stage-by-Stage Control Guide' }
+          : null,
+      scrollIntoView: vi.fn(),
+      focus: vi.fn(),
+      click: clicked
     };
 
     const root = {
-      querySelectorAll: (selector: string) => {
-        if (selector === 'a[href]') return [titleAnchor];
-        if (selector === 'cite, span, div') return [domainNode];
-        return [];
-      }
+      querySelectorAll: (selector: string) => (selector === 'a[href]' ? [anchor] : [])
     };
-
     const document = {
-      body: { innerText: 'Google Search results' },
-      readyState: 'interactive',
+      body: {
+        innerText: card.innerText,
+        querySelectorAll: () => []
+      },
+      documentElement: {},
       querySelector: (selector: string) => (selector === '#search' ? root : null)
     };
     const location = { href: 'https://www.google.com/search?q=rmg+cutting' };
+    const windowObject: Record<string, unknown> = { location };
 
-    const result = vm.runInNewContext(
-      buildGoogleResultScanScript('appareldiary.com', 'rmg cutting'),
-      {
-        window: { location, innerHeight: 800, innerWidth: 1200 },
-        location,
-        document,
-        URL
+    class MutationObserverMock {
+      constructor(_callback: () => void) {}
+      observe(): void {}
+      disconnect(): void {
+        disconnected();
       }
-    ) as { match?: { url: string; title: string } };
+    }
 
-    expect(result.match?.url).toBe(targetUrl);
-    expect(result.match?.title).toContain('RMG Cutting Process');
+    const context = vm.createContext({
+      window: windowObject,
+      document,
+      location,
+      URL,
+      MutationObserver: MutationObserverMock,
+      setInterval: () => 1,
+      clearInterval: () => undefined,
+      Date
+    });
+
+    const state = vm.runInContext(
+      buildInstallGoogleLiveTargetObserverScript('appareldiary.com', 'rmg cutting'),
+      context
+    ) as {
+      match?: { url: string; title: string };
+    };
+
+    expect(state.match?.url).toBe(targetUrl);
+    expect(state.match?.title).toContain('RMG Cutting Process');
+
+    const clickedResult = vm.runInContext(
+      buildClickGoogleLiveTargetObserverScript(),
+      context
+    ) as boolean;
+
+    expect(clickedResult).toBe(true);
+    expect(clicked).toHaveBeenCalledTimes(1);
+    expect(disconnected).toHaveBeenCalled();
   });
 
-  it('records a target match without clicking or navigating to the site', async () => {
+  it('locks page 1 until a delayed target appears, opens it, and never requests page 2', async () => {
     const targetUrl = 'https://appareldiary.com/article/rmg-cutting';
     let currentUrl = 'about:blank';
     let loading = false;
+    let readCount = 0;
     const handlers = new Map<string, Set<() => void>>();
-    const sendInputEvent = vi.fn();
 
     const emit = (event: string) => {
       for (const handler of handlers.get(event) ?? []) handler();
     };
 
+    const loadURL = vi.fn().mockImplementation(async (url: string) => {
+      currentUrl = url;
+      loading = true;
+      setTimeout(() => emit('dom-ready'), 5);
+    });
+
+    const executeJavaScript = vi.fn().mockImplementation(async (script: string) => {
+      if (script.includes('new MutationObserver')) {
+        return {
+          blocked: false,
+          observedResults: 2,
+          signature: 'partial-1'
+        };
+      }
+
+      if (script.includes('watcher && watcher.click')) {
+        currentUrl = targetUrl;
+        loading = false;
+        return true;
+      }
+
+      if (script.includes('delete window.__proxyDeskGoogleWatcher')) {
+        return true;
+      }
+
+      readCount += 1;
+      if (readCount < 4) {
+        return {
+          blocked: false,
+          observedResults: 2 + readCount,
+          signature: 'partial-' + readCount
+        };
+      }
+
+      return {
+        blocked: false,
+        observedResults: 7,
+        signature: 'complete',
+        matchedAt: Date.now(),
+        match: {
+          url: targetUrl,
+          title: 'RMG Cutting Process: A Stage-by-Stage Control Guide',
+          organicIndex: 2
+        }
+      };
+    });
+
     const webContents = {
-      loadURL: vi.fn().mockImplementation((url: string) => {
-        currentUrl = url;
-        loading = true;
-        setTimeout(() => emit('dom-ready'), 5);
-        return new Promise<void>(() => undefined);
-      }),
+      loadURL,
       getURL: () => currentUrl,
       isDestroyed: () => false,
       isLoading: () => loading,
@@ -426,20 +494,7 @@ describe('Google SEO measurement', () => {
       stop: () => {
         loading = false;
       },
-      executeJavaScript: vi.fn().mockResolvedValue({
-        blocked: false,
-        ready: true,
-        resultsScanned: 7,
-        observedResults: 7,
-        signature: 'stable-results',
-        match: {
-          url: targetUrl,
-          title: 'RMG Cutting Process: A Stage-by-Stage Control Guide',
-          organicIndex: 2,
-          clickPoint: { x: 240, y: 290 }
-        }
-      }),
-      sendInputEvent
+      executeJavaScript
     };
 
     const manager = new BrowserManager();
@@ -454,32 +509,62 @@ describe('Google SEO measurement', () => {
       token
     );
 
+    expect(readCount).toBeGreaterThanOrEqual(4);
+    expect(loadURL).toHaveBeenCalledTimes(1);
+    expect(String(loadURL.mock.calls[0][0])).not.toContain('start=10');
     expect(result.status).toBe('matched');
-    expect(result.matchedUrl).toBe(targetUrl);
     expect(result.resultPage).toBe(1);
-    expect(result.keepAliveStarted).toBe(false);
-    expect(currentUrl).toContain('google.');
-    expect(sendInputEvent).not.toHaveBeenCalled();
+    expect(result.matchedUrl).toBe(targetUrl);
+    expect(result.interactionStatus).toBe('opened');
+    expect(currentUrl).toBe(targetUrl);
   });
 
-  it('waits on the same page when the target appears after a partial render', async () => {
+  it('uses the observer-captured exact result URL if the in-page click is ignored', async () => {
     const targetUrl = 'https://appareldiary.com/article/rmg-cutting';
     let currentUrl = 'about:blank';
     let loading = false;
-    let scans = 0;
     const handlers = new Map<string, Set<() => void>>();
+    let resultRead = false;
 
     const emit = (event: string) => {
       for (const handler of handlers.get(event) ?? []) handler();
     };
 
+    const loadURL = vi.fn().mockImplementation(async (url: string) => {
+      currentUrl = url;
+      loading = false;
+      setTimeout(() => emit('dom-ready'), 1);
+    });
+
+    const executeJavaScript = vi.fn().mockImplementation(async (script: string) => {
+      if (script.includes('new MutationObserver')) {
+        return {
+          blocked: false,
+          observedResults: 6,
+          signature: 'stable'
+        };
+      }
+      if (script.includes('watcher && watcher.click')) return false;
+      if (script.includes('delete window.__proxyDeskGoogleWatcher')) return true;
+
+      if (!resultRead) {
+        resultRead = true;
+        return {
+          blocked: false,
+          observedResults: 6,
+          signature: 'stable',
+          match: {
+            url: targetUrl,
+            title: 'RMG Cutting Process',
+            organicIndex: 1
+          }
+        };
+      }
+      return null;
+    });
+
     const webContents = {
-      loadURL: vi.fn().mockImplementation((url: string) => {
-        currentUrl = url;
-        loading = true;
-        setTimeout(() => emit('dom-ready'), 5);
-        return new Promise<void>(() => undefined);
-      }),
+      loadURL,
       getURL: () => currentUrl,
       isDestroyed: () => false,
       isLoading: () => loading,
@@ -492,31 +577,7 @@ describe('Google SEO measurement', () => {
       stop: () => {
         loading = false;
       },
-      executeJavaScript: vi.fn().mockImplementation(async () => {
-        scans += 1;
-        if (scans < 4) {
-          return {
-            blocked: false,
-            ready: true,
-            resultsScanned: 3,
-            observedResults: 3,
-            signature: 'partial-' + scans
-          };
-        }
-
-        return {
-          blocked: false,
-          ready: true,
-          resultsScanned: 7,
-          observedResults: 7,
-          signature: 'full-set',
-          match: {
-            url: targetUrl,
-            title: 'RMG Cutting Process: A Stage-by-Stage Control Guide',
-            organicIndex: 2
-          }
-        };
-      })
+      executeJavaScript
     };
 
     const manager = new BrowserManager();
@@ -527,24 +588,28 @@ describe('Google SEO measurement', () => {
       2,
       'rmg cutting',
       'appareldiary.com',
-      20,
+      10,
       token
     );
 
-    expect(scans).toBeGreaterThanOrEqual(4);
-    expect(webContents.loadURL).toHaveBeenCalledTimes(1);
     expect(result.status).toBe('matched');
-    expect(result.resultPage).toBe(1);
+    expect(result.interactionStatus).toBe('opened');
+    expect(loadURL).toHaveBeenLastCalledWith(targetUrl);
+    expect(currentUrl).toBe(targetUrl);
   });
 
-  it('returns PAUSED on a Google challenge and reports recovery when normal results return', async () => {
-    let currentUrl =
-      'https://www.google.com/sorry/index?continue=https%3A%2F%2Fwww.google.com%2Fsearch%3Fq%3Drmg%2Bcutting';
+  it('returns PAUSED when the live observer sees a Google challenge', async () => {
+    let currentUrl = 'about:blank';
     const handlers = new Map<string, Set<() => void>>();
 
+    const emit = (event: string) => {
+      for (const handler of handlers.get(event) ?? []) handler();
+    };
+
     const webContents = {
-      loadURL: vi.fn().mockImplementation((_url: string) => {
-        return Promise.resolve();
+      loadURL: vi.fn().mockImplementation(async (url: string) => {
+        currentUrl = url;
+        setTimeout(() => emit('dom-ready'), 1);
       }),
       getURL: () => currentUrl,
       isDestroyed: () => false,
@@ -557,13 +622,16 @@ describe('Google SEO measurement', () => {
       removeListener: (event: string, handler: () => void) => handlers.get(event)?.delete(handler),
       stop: vi.fn(),
       executeJavaScript: vi.fn().mockImplementation(async (script: string) => {
-        if (script.includes('hasResults')) {
-          return { blocked: false, hasResults: true };
+        if (script.includes('new MutationObserver')) {
+          return {
+            blocked: true,
+            observedResults: 0,
+            signature: ''
+          };
         }
+        if (script.includes('delete window.__proxyDeskGoogleWatcher')) return true;
         return {
           blocked: true,
-          ready: true,
-          resultsScanned: 0,
           observedResults: 0,
           signature: ''
         };
@@ -583,13 +651,7 @@ describe('Google SEO measurement', () => {
     );
 
     expect(paused.status).toBe('paused');
-
-    setTimeout(() => {
-      currentUrl = 'https://www.google.com/search?q=rmg+cutting';
-    }, 10);
-
-    const recovered = await manager.waitForGoogleRecovery(3, 2_000);
-    expect(recovered).toBe(true);
+    expect(webContents.loadURL).toHaveBeenCalledTimes(1);
   });
 
   it('invalidates an old measurement token when a new proxy cycle starts', () => {
