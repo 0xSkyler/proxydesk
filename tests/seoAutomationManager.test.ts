@@ -106,6 +106,10 @@ describe('SeoAutomationManager continuous measurement', () => {
           ranAt: new Date().toISOString()
         };
       },
+      async clickControlledGoogleResult() {
+        return true;
+      },
+      startControlledKeepAlive() {},
       async waitForGoogleRecovery() {
         return true;
       }
@@ -211,6 +215,10 @@ describe('SeoAutomationManager continuous measurement', () => {
           ranAt: new Date().toISOString()
         };
       },
+      async clickControlledGoogleResult() {
+        return true;
+      },
+      startControlledKeepAlive() {},
       async waitForGoogleRecovery() {
         recoveryCount += 1;
         return true;
