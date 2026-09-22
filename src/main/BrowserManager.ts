@@ -828,14 +828,12 @@ export class BrowserManager extends EventEmitter {
     this.keepAliveTimer = setInterval(() => this.tickKeepAlive(), 500);
   }
 
-  configureKeepAlive(intervalMs: number, maxHops: number, _followLinks: boolean): void {
+  configureKeepAlive(intervalMs: number, maxHops: number, followLinks: boolean): void {
     this.keepAliveIntervalMs = Math.max(5_000, Math.min(3_600_000, Math.floor(intervalMs || 60_000)));
-    // This central value is the maximum number of content pages processed
-    // by each Keep Alive run, including the initial landing page.
     this.keepAliveMaxHops = Math.max(1, Math.min(1000, Math.floor(maxHops || 1)));
-    // Enhanced Keep Alive always follows eligible same-site content after
-    // completing the full-page scroll cycles, as requested.
-    this.keepAliveFollowLinks = true;
+    // Lite measurement builds keep link-following disabled by default.
+    // Manual Keep Alive still performs the two full scroll cycles.
+    this.keepAliveFollowLinks = followLinks;
     this.ensureKeepAliveTimer();
   }
 
