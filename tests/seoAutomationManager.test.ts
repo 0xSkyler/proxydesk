@@ -243,7 +243,98 @@ describe('SeoAutomationManager continuous measurement', () => {
     manager.stop();
   });
 
-  it('requires an explicitly designated test/staging/dev host for autonomous interaction', async () => {
+  it('uses Target website as the interaction host when no override is supplied', async () => {
+    const proxy = makeProxy('default-host');
+    const tokens = new Map<number, number>();
+    const events: string[] = [];
+
+    const proxyManager = {
+      cancelCurrentValidation() {},
+      resetRotationHistory() {},
+      async fetchValidateAssignStreaming(
+        browserIds: number[],
+        onAssignment: (assignment: { browserId: number; proxy: ProxyRecord }) => void
+      ): Promise<ReloadProxiesSummary> {
+        onAssignment({ browserId: browserIds[0], proxy });
+        return {
+          found: 1,
+          countryMatched: 1,
+          working: 1,
+          assignments: [{ browserId: browserIds[0], proxy }]
+        };
+      }
+    } as unknown as ProxyManager;
+
+    const browserManager = {
+      async assignProxy() {},
+      setBrowserKeepAlive() {},
+      cancelMeasurementSession(id: number) {
+        tokens.set(id, (tokens.get(id) ?? 0) + 1);
+      },
+      startMeasurementSession(id: number) {
+        const token = (tokens.get(id) ?? 0) + 1;
+        tokens.set(id, token);
+        return token;
+      },
+      isMeasurementSessionCurrent(id: number, token: number) {
+        return tokens.get(id) === token;
+      },
+      async broadcastSearch(id: number): Promise<BroadcastSearchResult> {
+        return {
+          browserId: id,
+          status: 'matched',
+          landedUrl: 'https://www.google.com/search?q=rmg+cutting',
+          matchedUrl: 'https://example.com/article/rmg-cutting',
+          matchedTitle: 'RMG Cutting Process',
+          monitoring: true,
+          ranAt: new Date().toISOString()
+        };
+      },
+      async clickControlledGoogleResult(
+        _id: number,
+        _query: string,
+        host: string,
+        url: string
+      ) {
+        events.push(`click:${host}:${url}`);
+        return true;
+      },
+      startControlledKeepAlive(_id: number, host: string) {
+        events.push(`keepalive:${host}`);
+      },
+      async waitForGoogleRecovery() {
+        return true;
+      }
+    } as unknown as BrowserManager;
+
+    const manager = new SeoAutomationManager(proxyManager, browserManager, async () => [1]);
+    const results: BroadcastSearchResult[] = [];
+    const opened = new Promise<void>((resolve) => {
+      manager.on('seoResult', ({ result }) => {
+        results.push(result);
+        if (result.interactionStatus === 'opened') resolve();
+      });
+    });
+
+    await manager.start({
+      query: 'rmg cutting',
+      targetWebsite: 'example.com',
+      intervalSec: 600,
+      browserCount: 1,
+      maxPages: 20
+    });
+
+    await opened;
+
+    expect(events).toContain('click:example.com:https://example.com/article/rmg-cutting');
+    expect(events).toContain('keepalive:example.com');
+    expect(results.at(-1)?.interactionStatus).toBe('opened');
+    expect(results.at(-1)?.keepAliveStarted).toBe(true);
+
+    manager.stop();
+  });
+
+  it('rejects an interaction-host override that differs from the Target website', async () => {
     const manager = new SeoAutomationManager(
       { cancelCurrentValidation() {}, resetRotationHistory() {} } as unknown as ProxyManager,
       {} as BrowserManager,
@@ -254,12 +345,12 @@ describe('SeoAutomationManager continuous measurement', () => {
       manager.start({
         query: 'rmg cutting',
         targetWebsite: 'example.com',
-        controlledTestHost: 'example.com',
+        controlledTestHost: 'other.example.com',
         intervalSec: 600,
         browserCount: 1,
         maxPages: 20
       })
-    ).rejects.toThrow(/test\/staging\/dev host/i);
+    ).rejects.toThrow(/exactly match/i);
   });
 
   it('clicks and starts controlled Keep Alive only for an exact test-host match', async () => {
@@ -331,9 +422,9 @@ describe('SeoAutomationManager continuous measurement', () => {
 
     const manager = new SeoAutomationManager(proxyManager, browserManager, async () => [1]);
 
-    const observed = new Promise<void>((resolve) => {
+    const observed = new Promise<BroadcastSearchResult>((resolve) => {
       manager.on('seoResult', ({ result }) => {
-        if (result.status === 'matched') resolve();
+        if (result.interactionStatus === 'opened') resolve(result);
       });
     });
 
@@ -346,11 +437,91 @@ describe('SeoAutomationManager continuous measurement', () => {
       maxPages: 20
     });
 
-    await observed;
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    const openedResult = await observed;
 
     expect(events.some((event) => event.startsWith('click:seo-test.appareldiary.com:'))).toBe(true);
     expect(events).toContain('controlled-keepalive:seo-test.appareldiary.com');
+    expect(openedResult.interactionStatus).toBe('opened');
+    expect(openedResult.keepAliveStarted).toBe(true);
+
+    manager.stop();
+  });
+
+  it('reports click-failed instead of silently leaving a matched browser idle', async () => {
+    const proxy = makeProxy('click-fail');
+    const tokens = new Map<number, number>();
+    const proxyManager = {
+      cancelCurrentValidation() {},
+      resetRotationHistory() {},
+      async fetchValidateAssignStreaming(
+        browserIds: number[],
+        onAssignment: (assignment: { browserId: number; proxy: ProxyRecord }) => void
+      ): Promise<ReloadProxiesSummary> {
+        onAssignment({ browserId: browserIds[0], proxy });
+        return {
+          found: 1,
+          countryMatched: 1,
+          working: 1,
+          assignments: [{ browserId: browserIds[0], proxy }]
+        };
+      }
+    } as unknown as ProxyManager;
+
+    const browserManager = {
+      async assignProxy() {},
+      setBrowserKeepAlive() {},
+      cancelMeasurementSession(id: number) {
+        tokens.set(id, (tokens.get(id) ?? 0) + 1);
+      },
+      startMeasurementSession(id: number) {
+        const token = (tokens.get(id) ?? 0) + 1;
+        tokens.set(id, token);
+        return token;
+      },
+      isMeasurementSessionCurrent(id: number, token: number) {
+        return tokens.get(id) === token;
+      },
+      async broadcastSearch(id: number): Promise<BroadcastSearchResult> {
+        return {
+          browserId: id,
+          status: 'matched',
+          landedUrl: 'https://www.google.com/search?q=rmg+cutting',
+          matchedUrl: 'https://example.com/article/rmg-cutting',
+          matchedTitle: 'RMG Cutting Process',
+          monitoring: true,
+          ranAt: new Date().toISOString()
+        };
+      },
+      async clickControlledGoogleResult() {
+        return false;
+      },
+      startControlledKeepAlive() {
+        throw new Error('Keep Alive must not start after a failed click.');
+      },
+      async waitForGoogleRecovery() {
+        return true;
+      }
+    } as unknown as BrowserManager;
+
+    const manager = new SeoAutomationManager(proxyManager, browserManager, async () => [1]);
+    const failed = new Promise<BroadcastSearchResult>((resolve) => {
+      manager.on('seoResult', ({ result }) => {
+        if (result.interactionStatus === 'click-failed') resolve(result);
+      });
+    });
+
+    await manager.start({
+      query: 'rmg cutting',
+      targetWebsite: 'example.com',
+      intervalSec: 600,
+      browserCount: 1,
+      maxPages: 20
+    });
+
+    const result = await failed;
+    expect(result.status).toBe('matched');
+    expect(result.interactionStatus).toBe('click-failed');
+    expect(result.error).toMatch(/could not be opened/i);
 
     manager.stop();
   });
