@@ -86,6 +86,8 @@ interface ManagedBrowser {
   keepAliveNextAt: number;
   keepAliveBusy: boolean;
   keepAliveVisited: Set<string>;
+  controlledKeepAliveHost: string | null;
+  controlledKeepAliveContinuous: boolean;
 }
 
 /**
@@ -230,7 +232,9 @@ export class BrowserManager extends EventEmitter {
       keepAliveHops: 0,
       keepAliveNextAt: Date.now() + this.keepAliveIntervalMs,
       keepAliveBusy: false,
-      keepAliveVisited: new Set<string>()
+      keepAliveVisited: new Set<string>(),
+      controlledKeepAliveHost: null,
+      controlledKeepAliveContinuous: false
     };
     this.browsers.set(id, managed);
     this.wireEvents(managed, options);
@@ -817,6 +821,127 @@ export class BrowserManager extends EventEmitter {
     await Promise.all(Array.from(this.browsers.keys()).map((id) => this.destroyBrowser(id)));
   }
 
+  async clickControlledGoogleResult(
+    id: number,
+    query: string,
+    controlledHost: string,
+    expectedUrl: string,
+    measurementToken: number
+  ): Promise<boolean> {
+    const managed = this.get(id);
+    const wc = managed.view.webContents;
+    const normalizedHost = normalizeTargetHost(controlledHost);
+    if (!normalizedHost || !this.isMeasurementSessionCurrent(id, measurementToken)) return false;
+
+    try {
+      const expectedHost = new URL(expectedUrl).hostname.toLowerCase().replace(/^www\./, '').replace(/\.$/, '');
+      if (expectedHost !== normalizedHost) return false;
+    } catch {
+      return false;
+    }
+
+    if (!isGoogleSearchResultsUrl(wc.getURL())) return false;
+
+    try {
+      const scan = (await wc.executeJavaScript(
+        buildGoogleResultScanScript(normalizedHost, query),
+        true
+      )) as GoogleResultScan;
+
+      if (!scan.match || !scan.match.url) return false;
+      const matchHost = new URL(scan.match.url).hostname.toLowerCase().replace(/^www\./, '').replace(/\.$/, '');
+      if (matchHost !== normalizedHost) return false;
+
+      const point = scan.match.clickPoint;
+      if (point && Number.isFinite(point.x) && Number.isFinite(point.y)) {
+        const x = Math.max(1, Math.round(point.x));
+        const y = Math.max(1, Math.round(point.y));
+        wc.sendInputEvent({ type: 'mouseMove', x, y });
+        wc.sendInputEvent({ type: 'mouseDown', x, y, button: 'left', clickCount: 1 });
+        wc.sendInputEvent({ type: 'mouseUp', x, y, button: 'left', clickCount: 1 });
+      } else {
+        const clicked = (await wc.executeJavaScript(
+          buildClickGoogleTargetResultScript(normalizedHost, query),
+          true
+        )) as boolean;
+        if (!clicked) return false;
+      }
+
+      const deadline = Date.now() + 8_000;
+      while (Date.now() < deadline) {
+        if (!this.isMeasurementSessionCurrent(id, measurementToken)) return false;
+        const current = wc.getURL();
+        try {
+          const host = new URL(current).hostname.toLowerCase().replace(/^www\./, '').replace(/\.$/, '');
+          if (host === normalizedHost) return true;
+        } catch {
+          // Keep waiting through transient navigation URLs.
+        }
+        await delay(100);
+      }
+
+      // One DOM-level retry is allowed if the native event was ignored.
+      if (isGoogleSearchResultsUrl(wc.getURL())) {
+        const clicked = (await wc.executeJavaScript(
+          buildClickGoogleTargetResultScript(normalizedHost, query),
+          true
+        ).catch(() => false)) as boolean;
+
+        if (clicked) {
+          const retryDeadline = Date.now() + 5_000;
+          while (Date.now() < retryDeadline) {
+            if (!this.isMeasurementSessionCurrent(id, measurementToken)) return false;
+            try {
+              const host = new URL(wc.getURL()).hostname.toLowerCase().replace(/^www\./, '').replace(/\.$/, '');
+              if (host === normalizedHost) return true;
+            } catch {
+              // Navigation is still settling.
+            }
+            await delay(100);
+          }
+        }
+      }
+    } catch (err) {
+      logger.warn('browser', `Browser ${id}: controlled test result click failed: ${(err as Error).message}`);
+    }
+
+    return false;
+  }
+
+  startControlledKeepAlive(id: number, controlledHost: string): void {
+    const managed = this.get(id);
+    const normalizedHost = normalizeTargetHost(controlledHost);
+    if (!normalizedHost) throw new Error('Invalid controlled test host.');
+
+    let currentHost = '';
+    try {
+      currentHost = new URL(managed.view.webContents.getURL()).hostname
+        .toLowerCase()
+        .replace(/^www\./, '')
+        .replace(/\.$/, '');
+    } catch {
+      throw new Error('Browser is not on a valid controlled test page.');
+    }
+
+    if (currentHost !== normalizedHost) {
+      throw new Error(`Controlled Keep Alive requires exact host ${normalizedHost}; browser is on ${currentHost || 'unknown'}.`);
+    }
+
+    this.ensureKeepAliveTimer();
+    managed.controlledKeepAliveHost = normalizedHost;
+    managed.controlledKeepAliveContinuous = true;
+    managed.keepAliveEnabled = true;
+    managed.keepAliveHops = 0;
+    managed.keepAliveVisited.clear();
+    managed.keepAliveVisited.add(managed.view.webContents.getURL());
+    managed.keepAliveNextAt = Date.now();
+    this.updateState(managed, {
+      keepAliveEnabled: true,
+      keepAliveHops: 0
+    });
+    queueMicrotask(() => this.tickKeepAlive());
+  }
+
   copyToClipboard(text: string): void {
     clipboard.writeText(text);
   }
@@ -846,6 +971,10 @@ export class BrowserManager extends EventEmitter {
     this.ensureKeepAliveTimer();
     const managed = this.get(id);
     managed.keepAliveEnabled = enabled;
+    if (!enabled) {
+      managed.controlledKeepAliveHost = null;
+      managed.controlledKeepAliveContinuous = false;
+    }
     if (resetHops) {
       managed.keepAliveHops = 0;
       managed.keepAliveVisited.clear();
@@ -908,11 +1037,16 @@ export class BrowserManager extends EventEmitter {
   private async runKeepAliveAction(managed: ManagedBrowser): Promise<void> {
     const wc = managed.view.webContents;
     const pagesVisited = managed.keepAliveHops + 1;
-    const canHop = this.keepAliveFollowLinks && pagesVisited < this.keepAliveMaxHops;
+    const controlled = managed.controlledKeepAliveContinuous && Boolean(managed.controlledKeepAliveHost);
+    const canHop = controlled || (this.keepAliveFollowLinks && pagesVisited < this.keepAliveMaxHops);
 
     try {
       const result = (await wc.executeJavaScript(
-        buildKeepAliveActionScript(canHop, Array.from(managed.keepAliveVisited)),
+        buildKeepAliveActionScript(
+          canHop,
+          Array.from(managed.keepAliveVisited),
+          managed.controlledKeepAliveHost ?? undefined
+        ),
         true
       )) as {
         clickedUrl?: string;
@@ -920,8 +1054,8 @@ export class BrowserManager extends EventEmitter {
 
       const completedAt = new Date().toISOString();
 
-      // The current page has now completed exactly two full down/up cycles.
-      if (pagesVisited >= this.keepAliveMaxHops) {
+      // Controlled test mode repeats until the next proxy rotation cancels it.
+      if (!controlled && pagesVisited >= this.keepAliveMaxHops) {
         managed.keepAliveEnabled = false;
         this.updateState(managed, {
           lastKeepAliveAt: completedAt,
@@ -932,6 +1066,17 @@ export class BrowserManager extends EventEmitter {
       }
 
       if (!canHop || !result.clickedUrl) {
+        if (controlled) {
+          // Stay alive on the current controlled page and try again shortly.
+          managed.keepAliveNextAt = Date.now() + 2_000;
+          this.updateState(managed, {
+            lastKeepAliveAt: completedAt,
+            keepAliveEnabled: true,
+            keepAliveHops: managed.keepAliveHops
+          });
+          return;
+        }
+
         managed.keepAliveEnabled = false;
         this.updateState(managed, {
           lastKeepAliveAt: completedAt,
@@ -943,6 +1088,7 @@ export class BrowserManager extends EventEmitter {
 
       managed.keepAliveVisited.add(result.clickedUrl);
       managed.keepAliveHops += 1;
+      if (controlled) managed.keepAliveNextAt = Date.now() + 1_500;
       this.updateState(managed, {
         keepAliveEnabled: true,
         keepAliveHops: managed.keepAliveHops,
@@ -960,9 +1106,14 @@ export class BrowserManager extends EventEmitter {
   }
 }
 
-export function buildKeepAliveActionScript(allowHop: boolean, visitedUrls: string[] = []): string {
+export function buildKeepAliveActionScript(
+  allowHop: boolean,
+  visitedUrls: string[] = [],
+  allowedHost?: string
+): string {
   return `(async () => {
     const visited = new Set(${JSON.stringify(visitedUrls)});
+    const allowedHost = ${JSON.stringify(allowedHost?.toLowerCase() ?? '')};
     const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
     const root = document.scrollingElement || document.documentElement || document.body;
     const pageHeight = () => Math.max(
@@ -1044,6 +1195,7 @@ export function buildKeepAliveActionScript(allowHop: boolean, visitedUrls: strin
 
         const host = url.hostname.toLowerCase().replace(/^www\\./, '');
         if (host !== currentHost) return;
+        if (allowedHost && host !== allowedHost) return;
 
         url.hash = '';
         const normalized = url.href;
