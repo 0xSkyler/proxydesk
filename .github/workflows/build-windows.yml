@@ -1,4 +1,4 @@
-# v0.4.4 continuous-measurement verification
+# v0.4.5 controlled-test verification
 name: Build Windows Installer
 
 on:
