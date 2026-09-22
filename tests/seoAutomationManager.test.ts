@@ -533,4 +533,89 @@ describe('SeoAutomationManager continuous measurement', () => {
 
     manager.stop();
   });
+
+  it('starts Keep Alive directly when the live Google observer already opened the target', async () => {
+    const proxy = makeProxy('observer-opened');
+    const tokens = new Map<number, number>();
+    let legacyClickCalls = 0;
+    const keepAliveHosts: string[] = [];
+
+    const proxyManager = {
+      cancelCurrentValidation() {},
+      resetRotationHistory() {},
+      async fetchValidateAssignStreaming(
+        browserIds: number[],
+        onAssignment: (assignment: { browserId: number; proxy: ProxyRecord }) => void
+      ): Promise<ReloadProxiesSummary> {
+        onAssignment({ browserId: browserIds[0], proxy });
+        return {
+          found: 1,
+          countryMatched: 1,
+          working: 1,
+          assignments: [{ browserId: browserIds[0], proxy }]
+        };
+      }
+    } as unknown as ProxyManager;
+
+    const browserManager = {
+      async assignProxy() {},
+      setBrowserKeepAlive() {},
+      cancelMeasurementSession(id: number) {
+        tokens.set(id, (tokens.get(id) ?? 0) + 1);
+      },
+      startMeasurementSession(id: number) {
+        const token = (tokens.get(id) ?? 0) + 1;
+        tokens.set(id, token);
+        return token;
+      },
+      isMeasurementSessionCurrent(id: number, token: number) {
+        return tokens.get(id) === token;
+      },
+      async broadcastSearch(id: number): Promise<BroadcastSearchResult> {
+        return {
+          browserId: id,
+          status: 'matched',
+          landedUrl: 'https://example.com/article/rmg-cutting',
+          matchedUrl: 'https://example.com/article/rmg-cutting',
+          matchedTitle: 'RMG Cutting Process',
+          interactionStatus: 'opened',
+          monitoring: true,
+          ranAt: new Date().toISOString()
+        };
+      },
+      async clickControlledGoogleResult() {
+        legacyClickCalls += 1;
+        return true;
+      },
+      startControlledKeepAlive(_id: number, host: string) {
+        keepAliveHosts.push(host);
+      },
+      async waitForGoogleRecovery() {
+        return true;
+      }
+    } as unknown as BrowserManager;
+
+    const manager = new SeoAutomationManager(proxyManager, browserManager, async () => [1]);
+    const opened = new Promise<BroadcastSearchResult>((resolve) => {
+      manager.on('seoResult', ({ result }) => {
+        if (result.keepAliveStarted) resolve(result);
+      });
+    });
+
+    await manager.start({
+      query: 'rmg cutting',
+      targetWebsite: 'example.com',
+      intervalSec: 600,
+      browserCount: 1,
+      maxPages: 20
+    });
+
+    const result = await opened;
+    expect(result.interactionStatus).toBe('opened');
+    expect(result.keepAliveStarted).toBe(true);
+    expect(legacyClickCalls).toBe(0);
+    expect(keepAliveHosts).toEqual(['example.com']);
+
+    manager.stop();
+  });
 });
