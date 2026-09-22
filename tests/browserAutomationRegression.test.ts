@@ -12,7 +12,8 @@ vi.mock('electron', () => ({
 import {
   BrowserManager,
   buildEphemeralPartitionName,
-  buildGoogleResultScanScript
+  buildGoogleResultScanScript,
+  buildKeepAliveActionScript
 } from '../src/main/BrowserManager';
 
 function installManagedBrowser(
@@ -89,7 +90,134 @@ describe('Keep Alive controls', () => {
   });
 });
 
+describe('Keep Alive article hopping', () => {
+  it('scrolls down/up exactly twice and clicks an internal article link', async () => {
+    const clicked = vi.fn();
+    const scrollBy = vi.fn();
+
+    const articleAnchor = {
+      href: 'https://appareldiary.com/article/another-rmg-article',
+      textContent: 'Another RMG Article',
+      target: '',
+      hasAttribute: () => false,
+      getAttribute: (name: string) => (name === 'rel' ? '' : null),
+      closest: (selector: string) => (selector === 'article' ? {} : null),
+      querySelector: () => ({ innerText: 'Another RMG Article' }),
+      getBoundingClientRect: () => ({ width: 200, height: 30 }),
+      scrollIntoView: vi.fn(),
+      focus: vi.fn(),
+      click: clicked
+    };
+
+    const root = {
+      scrollHeight: 600,
+      clientHeight: 600
+    };
+
+    const document = {
+      scrollingElement: root,
+      documentElement: root,
+      body: {
+        scrollHeight: 600,
+        querySelectorAll: () => []
+      },
+      querySelectorAll: (selector: string) => (selector === 'a[href]' ? [articleAnchor] : [])
+    };
+
+    const location = { href: 'https://appareldiary.com/article/current' };
+    const windowObject = {
+      innerHeight: 600,
+      scrollY: 0,
+      scrollTo: vi.fn(),
+      scrollBy
+    };
+
+    const result = await vm.runInNewContext(
+      buildKeepAliveActionScript(true, ['https://appareldiary.com/article/current']),
+      {
+        window: windowObject,
+        document,
+        location,
+        URL,
+        performance: { now: () => 0 },
+        requestAnimationFrame: (cb: (time: number) => void) => cb(1000),
+        setTimeout: (cb: () => void) => { cb(); return 1; },
+        Promise,
+        Set,
+        Math
+      }
+    ) as { clickedUrl?: string };
+
+    expect(scrollBy).toHaveBeenCalledTimes(4);
+    expect(clicked).toHaveBeenCalledTimes(1);
+    expect(result.clickedUrl).toBe('https://appareldiary.com/article/another-rmg-article');
+  });
+});
+
 describe('Google SEO page scanning', () => {
+  it('recognizes a Google result from visible keyword + website text even when markup is split', () => {
+    const targetUrl = 'https://appareldiary.com/article/precision-and-profit-rmg-cutting';
+    const rect = { left: 48, top: 410, width: 720, height: 42, right: 768, bottom: 452 };
+
+    const card = {
+      innerText:
+        'appareldiary.com\nhttps://appareldiary.com › article › precision-and-profit-a...\n' +
+        'RMG Cutting Process: A Stage-by-Stage Control Guide\n' +
+        'The RMG cutting process operates on 60–70%.',
+      parentElement: null,
+      querySelectorAll: (selector: string) => (selector === 'a[href]' ? [titleAnchor] : [])
+    };
+
+    const titleAnchor = {
+      href: targetUrl,
+      innerText: 'RMG Cutting Process: A Stage-by-Stage Control Guide',
+      getAttribute: (name: string) => (name === 'href' ? targetUrl : null),
+      querySelector: (selector: string) =>
+        selector === 'h3' ? { innerText: 'RMG Cutting Process: A Stage-by-Stage Control Guide' } : null,
+      closest: () => card,
+      parentElement: card,
+      getBoundingClientRect: () => rect,
+      scrollIntoView: vi.fn()
+    };
+
+    const domainNode = {
+      innerText: 'appareldiary.com',
+      parentElement: card,
+      closest: (selector: string) => (selector === 'a[href]' ? null : card)
+    };
+
+    const root = {
+      querySelectorAll: (selector: string) => {
+        if (selector === 'a[href]') return [titleAnchor];
+        if (selector === 'cite, span, div') return [domainNode];
+        return [];
+      }
+    };
+
+    const document = {
+      body: { innerText: 'Google Search results' },
+      readyState: 'interactive',
+      querySelector: (selector: string) => (selector === '#search' ? root : null)
+    };
+    const location = { href: 'https://www.google.com/search?q=rmg+cutting' };
+
+    const result = vm.runInNewContext(
+      buildGoogleResultScanScript('appareldiary.com', 'rmg cutting'),
+      {
+        window: { location, innerHeight: 800, innerWidth: 1200 },
+        location,
+        document,
+        URL
+      }
+    ) as {
+      ready: boolean;
+      match?: { url: string; title: string };
+    };
+
+    expect(result.match?.url).toBe(targetUrl);
+    expect(result.match?.title).toContain('RMG Cutting Process');
+  });
+
   it('matches screenshot-style Google markup where domain and article title share a result card', () => {
     const targetUrl = 'https://appareldiary.com/article/rmg-cutting';
     const rect = { left: 60, top: 280, width: 520, height: 34, right: 580, bottom: 314 };
@@ -126,7 +254,7 @@ describe('Google SEO page scanning', () => {
     };
     const location = { href: 'https://www.google.com/search?q=rmg+cutting' };
 
-    const result = vm.runInNewContext(buildGoogleResultScanScript('appareldiary.com'), {
+    const result = vm.runInNewContext(buildGoogleResultScanScript('appareldiary.com', 'rmg cutting'), {
       window: { location, innerHeight: 800, innerWidth: 1200 },
       location,
       document,
