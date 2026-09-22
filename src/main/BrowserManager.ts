@@ -620,30 +620,33 @@ export class BrowserManager extends EventEmitter {
         };
       }
 
-      // After stop(), script execution is no longer queued behind Google's
-      // unfinished network load. Keep rescanning this SAME page while the
-      // organic result set settles. Never paginate merely because header or
-      // footer anchors exist.
-      let scan: GoogleResultScan = {
-        blocked: false,
-        ready: false,
-        resultsScanned: 0,
-        observedResults: 0,
-        signature: ''
-      };
-      let pageMaxObserved = 0;
-      let lastSignature = '';
-      let stableScans = 0;
-      let zeroReadyScans = 0;
-      let firstOrganicAt = 0;
-      const firstScanStartedAt = Date.now();
-      const scanDeadline = firstScanStartedAt + 5_000;
+      // Install one live watcher inside the CURRENT Google page. It observes
+      // DOM mutations as result cards render and locks the page immediately
+      // when keyword + target host appear together. Pagination is forbidden
+      // while this watcher is active.
+      let watcher: GoogleLiveTargetState | null = null;
+      try {
+        watcher = (await wc.executeJavaScript(
+          buildInstallGoogleLiveTargetObserverScript(targetHost, query),
+          true
+        )) as GoogleLiveTargetState | null;
+      } catch {
+        watcher = null;
+      }
 
-      while (Date.now() < scanDeadline) {
+      let pageMaxObserved = watcher?.observedResults ?? 0;
+      let lastSignature = watcher?.signature ?? '';
+      let stableScans = watcher?.signature ? 1 : 0;
+      let firstObservedAt = watcher?.observedResults ? Date.now() : 0;
+      const watchStartedAt = Date.now();
+      const watchDeadline = watchStartedAt + 8_000;
+
+      while (Date.now() < watchDeadline) {
         if (
           measurementToken != null &&
           !this.isMeasurementSessionCurrent(id, measurementToken)
         ) {
+          void wc.executeJavaScript(buildStopGoogleLiveTargetObserverScript(), true).catch(() => undefined);
           return {
             browserId: id,
             status: 'monitoring',
@@ -654,41 +657,62 @@ export class BrowserManager extends EventEmitter {
           };
         }
 
-        try {
-          const attempt = await Promise.race([
-            wc.executeJavaScript(
-              buildGoogleResultScanScript(targetHost, query),
-              true
-            ).then((value) => ({ kind: 'scan' as const, value })),
-            delay(250).then(() => ({ kind: 'timeout' as const }))
-          ]);
-
-          if (attempt.kind === 'timeout') {
-            // Some Electron/Google combinations delay script execution while
-            // the navigation is busy. Do not wait for the full page: after a
-            // short render window, stop only the remaining resources and
-            // continue scanning the DOM that is already visible.
-            if (wc.isLoading() && Date.now() - firstScanStartedAt >= 1_800) {
-              wc.stop();
-              await delay(40);
-            } else {
-              await delay(60);
-            }
-            continue;
-          }
-
-          scan = attempt.value as GoogleResultScan;
-        } catch {
-          if (wc.isLoading() && Date.now() - firstScanStartedAt >= 1_800) {
-            wc.stop();
-            await delay(40);
-          } else {
-            await delay(80);
-          }
-          continue;
+        const activeUrl = wc.getURL();
+        if (extractGoogleBlockContinueUrl(activeUrl)) {
+          void wc.executeJavaScript(buildStopGoogleLiveTargetObserverScript(), true).catch(() => undefined);
+          return {
+            browserId: id,
+            status: 'paused',
+            landedUrl: activeUrl,
+            monitoring: true,
+            resultsScanned: totalScanned,
+            ranAt
+          };
         }
 
-        if (scan.blocked) {
+        // A watcher-triggered click may already have navigated away from
+        // Google. Treat an exact target-host landing as success immediately.
+        if (!isGoogleSearchResultsUrl(activeUrl)) {
+          try {
+            const landedHost = new URL(activeUrl).hostname
+              .toLowerCase()
+              .replace(/^www\./, '')
+              .replace(/\.$/, '');
+            if (landedHost === targetHost) {
+              totalScanned += pageMaxObserved;
+              return {
+                browserId: id,
+                status: 'matched',
+                landedUrl: activeUrl,
+                matchedUrl: watcher?.match?.url ?? activeUrl,
+                matchedTitle: watcher?.match?.title ?? '',
+                resultsScanned: totalScanned,
+                position: pageIndex * 10 + (watcher?.match?.organicIndex ?? 0) + 1,
+                resultPage: pageIndex + 1,
+                monitoring: true,
+                interactionStatus: 'opened',
+                keepAliveStarted: false,
+                ranAt
+              };
+            }
+          } catch {
+            // Transitional navigation URL; keep observing.
+          }
+        }
+
+        try {
+          const state = await Promise.race([
+            wc.executeJavaScript(buildReadGoogleLiveTargetObserverScript(), true),
+            delay(220).then(() => null)
+          ]);
+
+          if (state) watcher = state as GoogleLiveTargetState;
+        } catch {
+          // Google may still be committing the results document.
+        }
+
+        if (watcher?.blocked) {
+          void wc.executeJavaScript(buildStopGoogleLiveTargetObserverScript(), true).catch(() => undefined);
           return {
             browserId: id,
             status: 'paused',
@@ -699,55 +723,153 @@ export class BrowserManager extends EventEmitter {
           };
         }
 
-        pageMaxObserved = Math.max(pageMaxObserved, scan.observedResults || scan.resultsScanned || 0);
+        if (watcher) {
+          pageMaxObserved = Math.max(pageMaxObserved, watcher.observedResults || 0);
 
-        // A target wins immediately, even if the rest of the page is still
-        // rendering.
-        if (scan.match) break;
+          if (watcher.match) {
+            // Match detection and first click are deliberately coupled to the
+            // same page watcher so Google cannot paginate between them.
+            const matched = watcher.match;
+            const clickResult = await Promise.race([
+              wc.executeJavaScript(buildClickGoogleLiveTargetObserverScript(), true),
+              delay(350).then(() => false)
+            ]).catch(() => false);
 
-        if (scan.observedResults > 0) {
-          if (!firstOrganicAt) firstOrganicAt = Date.now();
-          if (scan.signature && scan.signature === lastSignature) {
-            stableScans += 1;
-          } else {
-            lastSignature = scan.signature;
-            stableScans = 1;
+            const navigationDeadline = Date.now() + 3_500;
+            while (Date.now() < navigationDeadline) {
+              if (
+                measurementToken != null &&
+                !this.isMeasurementSessionCurrent(id, measurementToken)
+              ) {
+                return {
+                  browserId: id,
+                  status: 'monitoring',
+                  landedUrl: wc.getURL(),
+                  resultsScanned: totalScanned,
+                  monitoring: true,
+                  ranAt
+                };
+              }
+
+              try {
+                const current = wc.getURL();
+                const host = new URL(current).hostname
+                  .toLowerCase()
+                  .replace(/^www\./, '')
+                  .replace(/\.$/, '');
+                if (host === targetHost) {
+                  totalScanned += pageMaxObserved;
+                  return {
+                    browserId: id,
+                    status: 'matched',
+                    landedUrl: current,
+                    matchedUrl: matched.url,
+                    matchedTitle: matched.title,
+                    resultsScanned: totalScanned,
+                    position: pageIndex * 10 + matched.organicIndex + 1,
+                    resultPage: pageIndex + 1,
+                    monitoring: true,
+                    interactionStatus: 'opened',
+                    keepAliveStarted: false,
+                    ranAt
+                  };
+                }
+              } catch {
+                // Keep waiting while navigation commits.
+              }
+              await delay(75);
+            }
+
+            // DOM/native activation can be ignored by some Google result
+            // layouts. The final fallback uses ONLY the exact URL captured
+            // from the matched Google card; no destination is constructed.
+            if (
+              clickResult !== false &&
+              isGoogleSearchResultsUrl(wc.getURL()) &&
+              (!measurementToken || this.isMeasurementSessionCurrent(id, measurementToken))
+            ) {
+              await wc.loadURL(matched.url).catch(() => undefined);
+            } else if (
+              isGoogleSearchResultsUrl(wc.getURL()) &&
+              (!measurementToken || this.isMeasurementSessionCurrent(id, measurementToken))
+            ) {
+              await wc.loadURL(matched.url).catch(() => undefined);
+            }
+
+            const fallbackDeadline = Date.now() + 5_000;
+            while (Date.now() < fallbackDeadline) {
+              try {
+                const current = wc.getURL();
+                const host = new URL(current).hostname
+                  .toLowerCase()
+                  .replace(/^www\./, '')
+                  .replace(/\.$/, '');
+                if (host === targetHost) {
+                  totalScanned += pageMaxObserved;
+                  return {
+                    browserId: id,
+                    status: 'matched',
+                    landedUrl: current,
+                    matchedUrl: matched.url,
+                    matchedTitle: matched.title,
+                    resultsScanned: totalScanned,
+                    position: pageIndex * 10 + matched.organicIndex + 1,
+                    resultPage: pageIndex + 1,
+                    monitoring: true,
+                    interactionStatus: 'opened',
+                    keepAliveStarted: false,
+                    ranAt
+                  };
+                }
+              } catch {
+                // Navigation is still settling.
+              }
+              await delay(100);
+            }
+
+            totalScanned += pageMaxObserved;
+            return {
+              browserId: id,
+              status: 'matched',
+              landedUrl: wc.getURL(),
+              matchedUrl: matched.url,
+              matchedTitle: matched.title,
+              resultsScanned: totalScanned,
+              position: pageIndex * 10 + matched.organicIndex + 1,
+              resultPage: pageIndex + 1,
+              monitoring: true,
+              interactionStatus: 'click-failed',
+              error: 'Target appeared in Google, but navigation to the detected result did not complete.',
+              keepAliveStarted: false,
+              ranAt
+            };
           }
 
-          // Require several identical snapshots over time before declaring
-          // the page a real no-match. This prevents page 1 -> page 20 races.
-          if (stableScans >= 6 && Date.now() - firstOrganicAt >= 1_000) break;
-        } else if (scan.ready) {
-          zeroReadyScans += 1;
-          // A genuinely empty/omitted-results page may have no organic links.
-          // Still wait multiple scans before moving on.
-          if (zeroReadyScans >= 8) break;
+          if (watcher.observedResults > 0) {
+            if (!firstObservedAt) firstObservedAt = Date.now();
+            if (watcher.signature && watcher.signature === lastSignature) {
+              stableScans += 1;
+            } else {
+              lastSignature = watcher.signature;
+              stableScans = 1;
+            }
+
+            // Do not leave a page quickly. The result set must remain
+            // unchanged for ~2.5 s and at least 12 observer reads.
+            if (stableScans >= 12 && Date.now() - firstObservedAt >= 2_500) {
+              break;
+            }
+          }
         }
 
-        await delay(140);
+        await delay(100);
       }
 
       totalScanned += pageMaxObserved;
-      if (!scan.match) {
-        // Only after the current organic result set is stable (or the full
-        // scan window expires) is the next Google page allowed.
-        if (wc.isLoading()) wc.stop();
-        continue;
-      }
-
-      return {
-        browserId: id,
-        status: 'matched',
-        landedUrl: wc.getURL(),
-        matchedUrl: scan.match.url,
-        matchedTitle: scan.match.title,
-        resultsScanned: totalScanned,
-        position: pageIndex * 10 + scan.match.organicIndex + 1,
-        resultPage: pageIndex + 1,
-        monitoring: true,
-        keepAliveStarted: false,
-        ranAt
-      };
+      void wc.executeJavaScript(buildStopGoogleLiveTargetObserverScript(), true).catch(() => undefined);
+      if (wc.isLoading()) wc.stop();
+      // Only now is requesting the next Google page allowed.
+      continue;
     }
 
     return {
@@ -1298,6 +1420,319 @@ interface GoogleResultScan {
     organicIndex: number;
     clickPoint?: { x: number; y: number };
   };
+}
+
+interface GoogleLiveTargetState {
+  blocked: boolean;
+  observedResults: number;
+  signature: string;
+  matchedAt?: number;
+  match?: {
+    url: string;
+    title: string;
+    organicIndex: number;
+  };
+}
+
+export function buildInstallGoogleLiveTargetObserverScript(
+  targetHost: string,
+  query = ''
+): string {
+  return `(function() {
+    try {
+      var target = ${JSON.stringify(targetHost.toLowerCase())};
+      var queryText = ${JSON.stringify(query.toLowerCase())};
+      var key = target + '|' + queryText;
+      var previous = window.__proxyDeskGoogleWatcher;
+      if (previous && previous.key === key && previous.state) {
+        return Object.assign({}, previous.state);
+      }
+      if (previous && previous.stop) previous.stop();
+
+      var state = {
+        blocked: false,
+        observedResults: 0,
+        signature: ''
+      };
+      var matchedAnchor = null;
+
+      function normalizeWords(text) {
+        return String(text || '')
+          .toLowerCase()
+          .replace(/www\\./g, '')
+          .replace(/[^a-z0-9]+/g, ' ')
+          .trim()
+          .replace(/\\s+/g, ' ');
+      }
+
+      var tokens = normalizeWords(queryText)
+        .split(' ')
+        .filter(function(token) { return token.length >= 2; });
+
+      function keywordMatches(text) {
+        if (!tokens.length) return true;
+        var normalized = ' ' + normalizeWords(text) + ' ';
+        return tokens.every(function(token) {
+          return normalized.indexOf(' ' + token + ' ') !== -1;
+        });
+      }
+
+      function normalizeHost(host) {
+        return String(host || '').toLowerCase().replace(/^www\\./, '').replace(/\\.$/, '');
+      }
+
+      function unwrap(href) {
+        try {
+          var resolved = new URL(href, location.href);
+          if (/(^|\\.)google\\.[a-z.]+$/i.test(resolved.hostname) && resolved.pathname === '/url') {
+            return resolved.searchParams.get('url') || resolved.searchParams.get('q') || href;
+          }
+          return resolved.href;
+        } catch (_) {
+          return href;
+        }
+      }
+
+      function destinationHost(url) {
+        try {
+          return normalizeHost(new URL(url, location.href).hostname);
+        } catch (_) {
+          return '';
+        }
+      }
+
+      function mentionsTarget(text) {
+        var normalized = normalizeWords(text).replace(/\\s+/g, '');
+        var targetWords = normalizeWords(target).replace(/\\s+/g, '');
+        return normalized.indexOf(targetWords) !== -1;
+      }
+
+      function scan() {
+        try {
+          var pageText = (document.body && document.body.innerText) || '';
+          var href = location.href;
+          if (
+            /\\/sorry\\/|consent\\.google\\./i.test(href) ||
+            /unusual traffic|not a robot|recaptcha|verify you are human/i.test(pageText.slice(0, 5000))
+          ) {
+            state.blocked = true;
+            return;
+          }
+
+          state.blocked = false;
+          var root = document.querySelector('#search') ||
+            document.querySelector('#rso') ||
+            document.querySelector('main') ||
+            document.body;
+          if (!root) return;
+
+          var anchors = Array.prototype.slice.call(root.querySelectorAll('a[href]'));
+          var organic = [];
+          var candidates = [];
+
+          anchors.forEach(function(anchor) {
+            try {
+              var destination = unwrap(anchor.getAttribute('href') || anchor.href || '');
+              var host = destinationHost(destination);
+              if (!destination || /(^|\\.)google\\.[a-z.]+$/i.test(host)) return;
+
+              var current = anchor;
+              var bestBlockText = (anchor.innerText || '').trim();
+              for (var depth = 0; current && depth < 9; depth += 1, current = current.parentElement) {
+                var text = ((current && current.innerText) || '').trim();
+                if (text.length >= bestBlockText.length && text.length <= 4200) {
+                  bestBlockText = text;
+                }
+                if (mentionsTarget(text) && keywordMatches(text)) break;
+              }
+
+              if (/\\bSponsored\\b/i.test(bestBlockText.slice(0, 280))) return;
+
+              var titleNode = anchor.querySelector && anchor.querySelector('h3');
+              var title = (
+                (titleNode && titleNode.innerText) ||
+                anchor.getAttribute('aria-label') ||
+                anchor.innerText ||
+                ''
+              ).trim();
+
+              var looksOrganic = Boolean(titleNode) ||
+                bestBlockText.length >= 18 ||
+                host === target;
+              if (!looksOrganic) return;
+
+              var normalizedUrl = destination.split('#')[0];
+              organic.push(normalizedUrl + '|' + bestBlockText.slice(0, 120));
+
+              var exactHost = host === target;
+              var textHost = mentionsTarget(bestBlockText);
+              var keyMatch = keywordMatches(title) || keywordMatches(bestBlockText);
+              if ((exactHost || textHost) && keyMatch) {
+                var score = 0;
+                if (exactHost) score += 300;
+                if (keywordMatches(title)) score += 240;
+                if (titleNode) score += 120;
+                if (textHost) score += 80;
+                candidates.push({
+                  anchor: anchor,
+                  url: destination,
+                  title: title,
+                  score: score
+                });
+              }
+            } catch (_) {
+              // Ignore malformed result anchors.
+            }
+          });
+
+          state.observedResults = organic.length;
+          state.signature = organic.slice(0, 40).join('||');
+
+          if (!candidates.length) {
+            // Extra text-first pass for layouts where the domain line and
+            // title are siblings rather than part of the same anchor.
+            var textNodes = Array.prototype.slice.call(root.querySelectorAll('cite, span, div'));
+            for (var i = 0; i < textNodes.length; i += 1) {
+              var node = textNodes[i];
+              var directText = (node.innerText || '').trim();
+              if (!mentionsTarget(directText)) continue;
+
+              var card = node;
+              for (var depth = 0; card && depth < 9; depth += 1, card = card.parentElement) {
+                var cardText = ((card && card.innerText) || '').trim();
+                if (!keywordMatches(cardText) || !mentionsTarget(cardText)) continue;
+                if (/\\bSponsored\\b/i.test(cardText.slice(0, 280))) break;
+
+                var cardAnchors = card.querySelectorAll
+                  ? Array.prototype.slice.call(card.querySelectorAll('a[href]'))
+                  : [];
+                for (var j = 0; j < cardAnchors.length; j += 1) {
+                  var a = cardAnchors[j];
+                  var url = unwrap(a.getAttribute('href') || a.href || '');
+                  var host = destinationHost(url);
+                  if (host !== target) continue;
+                  var h3 = a.querySelector && a.querySelector('h3');
+                  var text = ((h3 && h3.innerText) || a.innerText || '').trim();
+                  candidates.push({
+                    anchor: a,
+                    url: url,
+                    title: text,
+                    score: (keywordMatches(text) ? 500 : 250) + (h3 ? 100 : 0)
+                  });
+                }
+                if (candidates.length) break;
+              }
+              if (candidates.length) break;
+            }
+          }
+
+          if (!candidates.length) return;
+
+          candidates.sort(function(a, b) { return b.score - a.score; });
+          var winner = candidates[0];
+          matchedAnchor = winner.anchor;
+          var winnerUrl = winner.url;
+          var organicIndex = 0;
+          for (var k = 0; k < organic.length; k += 1) {
+            if (organic[k].indexOf(winnerUrl.split('#')[0] + '|') === 0) {
+              organicIndex = k;
+              break;
+            }
+          }
+
+          state.match = {
+            url: winnerUrl,
+            title: winner.title,
+            organicIndex: organicIndex
+          };
+          state.matchedAt = Date.now();
+
+          if (observer) observer.disconnect();
+          if (timer) clearInterval(timer);
+        } catch (_) {
+          // Keep observer alive; later mutations may become parseable.
+        }
+      }
+
+      var observer = new MutationObserver(function() {
+        if (!state.match) scan();
+      });
+      var observeRoot = document.documentElement || document.body;
+      if (observeRoot) {
+        observer.observe(observeRoot, {
+          childList: true,
+          subtree: true,
+          characterData: true
+        });
+      }
+
+      var timer = setInterval(function() {
+        if (!state.match) scan();
+      }, 120);
+
+      window.__proxyDeskGoogleWatcher = {
+        key: key,
+        state: state,
+        click: function() {
+          if (!matchedAnchor || !state.match) return false;
+          try {
+            matchedAnchor.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'auto' });
+            matchedAnchor.target = '_self';
+            matchedAnchor.focus({ preventScroll: true });
+            matchedAnchor.click();
+            return true;
+          } catch (_) {
+            return false;
+          }
+        },
+        stop: function() {
+          try { observer.disconnect(); } catch (_) {}
+          try { clearInterval(timer); } catch (_) {}
+        }
+      };
+
+      scan();
+      return Object.assign({}, state);
+    } catch (_) {
+      return null;
+    }
+  })()`;
+}
+
+export function buildReadGoogleLiveTargetObserverScript(): string {
+  return `(function() {
+    try {
+      var watcher = window.__proxyDeskGoogleWatcher;
+      if (!watcher || !watcher.state) return null;
+      return Object.assign({}, watcher.state);
+    } catch (_) {
+      return null;
+    }
+  })()`;
+}
+
+export function buildClickGoogleLiveTargetObserverScript(): string {
+  return `(function() {
+    try {
+      var watcher = window.__proxyDeskGoogleWatcher;
+      return Boolean(watcher && watcher.click && watcher.click());
+    } catch (_) {
+      return false;
+    }
+  })()`;
+}
+
+export function buildStopGoogleLiveTargetObserverScript(): string {
+  return `(function() {
+    try {
+      var watcher = window.__proxyDeskGoogleWatcher;
+      if (watcher && watcher.stop) watcher.stop();
+      delete window.__proxyDeskGoogleWatcher;
+      return true;
+    } catch (_) {
+      return false;
+    }
+  })()`;
 }
 
 export function buildGoogleResultScanScript(targetHost: string, query = ''): string {
