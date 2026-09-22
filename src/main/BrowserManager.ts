@@ -901,6 +901,28 @@ export class BrowserManager extends EventEmitter {
           }
         }
       }
+
+      // Final controlled-test fallback: navigate only to the exact URL that
+      // was detected in Google's result card. This never constructs or guesses
+      // a destination, and the exact-host check above already guarantees the
+      // URL belongs to the configured controlled test environment.
+      if (
+        isGoogleSearchResultsUrl(wc.getURL()) &&
+        this.isMeasurementSessionCurrent(id, measurementToken)
+      ) {
+        await wc.loadURL(expectedUrl).catch(() => undefined);
+        const fallbackDeadline = Date.now() + 6_000;
+        while (Date.now() < fallbackDeadline) {
+          if (!this.isMeasurementSessionCurrent(id, measurementToken)) return false;
+          try {
+            const host = new URL(wc.getURL()).hostname.toLowerCase().replace(/^www\./, '').replace(/\.$/, '');
+            if (host === normalizedHost) return true;
+          } catch {
+            // Keep waiting while navigation settles.
+          }
+          await delay(100);
+        }
+      }
     } catch (err) {
       logger.warn('browser', `Browser ${id}: controlled test result click failed: ${(err as Error).message}`);
     }
