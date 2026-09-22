@@ -103,7 +103,7 @@ async function bootstrap(): Promise<void> {
   await ensureBrowserCount(activeBrowserCount);
 
   // Keep Alive is automatic after a matched Google result.
-  browserManager.configureKeepAlive(60_000, 25, true);
+  browserManager.configureKeepAlive(60_000, 1, false);
 
   await loadRenderer();
   logger.info('application', 'ProxyDesk SEO Tracker Lite ready.');
