@@ -22,6 +22,14 @@ export function registerIpc(deps: IpcDeps): void {
     IPC_CHANNELS.browserSetBounds,
     (_event, id: number, bounds: BrowserBounds) => browserManager.setBounds(id, bounds)
   );
+  ipcMain.handle(
+    IPC_CHANNELS.browserSetKeepAlive,
+    (_event, id: number, enabled: boolean) => browserManager.setBrowserKeepAlive(id, enabled, enabled)
+  );
+  ipcMain.handle(
+    IPC_CHANNELS.browserSetKeepAliveAll,
+    (_event, enabled: boolean) => browserManager.setKeepAliveAll(enabled, enabled)
+  );
 
   ipcMain.handle(IPC_CHANNELS.automationGetState, () => automationManager.getState());
   ipcMain.handle(IPC_CHANNELS.automationStart, (_event, config) => automationManager.start(config));
