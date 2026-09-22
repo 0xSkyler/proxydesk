@@ -15,6 +15,43 @@ import type { BrowserManager } from './BrowserManager';
 import type { ProxyManager } from './ProxyManager';
 import { logger } from './Logger';
 
+export function isControlledTestHost(host: string): boolean {
+  const normalized = normalizeTargetHost(host);
+  if (!normalized) return false;
+
+  if (
+    normalized === 'localhost' ||
+    normalized.endsWith('.localhost') ||
+    /^127(?:\.\d{1,3}){3}$/.test(normalized) ||
+    /^10(?:\.\d{1,3}){3}$/.test(normalized) ||
+    /^192\.168(?:\.\d{1,3}){2}$/.test(normalized) ||
+    /^172\.(?:1[6-9]|2\d|3[01])(?:\.\d{1,3}){2}$/.test(normalized)
+  ) {
+    return true;
+  }
+
+  const labels = normalized.split('.');
+  if (labels.length < 3) return false;
+
+  const testLabels = new Set([
+    'test',
+    'testing',
+    'staging',
+    'stage',
+    'stg',
+    'qa',
+    'dev',
+    'development',
+    'sandbox',
+    'preview',
+    'demo',
+    'lab',
+    'labs'
+  ]);
+
+  return labels.slice(0, -2).some((label) => testLabels.has(label));
+}
+
 // eslint-disable-next-line @typescript-eslint/no-unsafe-declaration-merging
 export declare interface SeoAutomationManager {
   on(event: 'stateChanged', listener: (state: SeoAutomationState) => void): this;
@@ -83,8 +120,10 @@ export class SeoAutomationManager extends EventEmitter {
       if (controlledTestHost !== targetHost) {
         throw new Error('Controlled test host must exactly match the Target website host.');
       }
-      if (controlledTestHost === 'appareldiary.com') {
-        throw new Error('The production host appareldiary.com cannot be used for autonomous controlled-test clicking. Use a dedicated test/staging hostname.');
+      if (!isControlledTestHost(controlledTestHost)) {
+        throw new Error(
+          'Autonomous click + Keep Alive requires a clearly designated test/staging/dev host, localhost, or a private test address.'
+        );
       }
     }
 
