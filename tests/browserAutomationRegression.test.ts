@@ -147,6 +147,144 @@ describe('manual Keep Alive', () => {
   });
 });
 
+describe('controlled test interaction', () => {
+  it('clicks an exact controlled-test Google result and verifies the landing host', async () => {
+    const controlledHost = 'seo-test.appareldiary.com';
+    const targetUrl = `https://${controlledHost}/article/rmg-cutting`;
+    let currentUrl = 'https://www.google.com/search?q=rmg+cutting';
+
+    const webContents = {
+      getURL: () => currentUrl,
+      isDestroyed: () => false,
+      isLoading: () => false,
+      stop: vi.fn(),
+      executeJavaScript: vi.fn().mockResolvedValue({
+        blocked: false,
+        ready: true,
+        resultsScanned: 6,
+        observedResults: 6,
+        signature: 'stable',
+        match: {
+          url: targetUrl,
+          title: 'RMG Cutting Process',
+          organicIndex: 1,
+          clickPoint: { x: 240, y: 300 }
+        }
+      }),
+      sendInputEvent: vi.fn((event: { type: string }) => {
+        if (event.type === 'mouseUp') currentUrl = targetUrl;
+      })
+    };
+
+    const manager = new BrowserManager();
+    installManagedBrowser(manager, 11, webContents);
+    const token = manager.startMeasurementSession(11);
+
+    const clicked = await manager.clickControlledGoogleResult(
+      11,
+      'rmg cutting',
+      controlledHost,
+      targetUrl,
+      token
+    );
+
+    expect(clicked).toBe(true);
+    expect(currentUrl).toBe(targetUrl);
+    expect(webContents.sendInputEvent).toHaveBeenCalled();
+  });
+
+  it('refuses a controlled click when the detected result host differs from the configured host', async () => {
+    const webContents = {
+      getURL: () => 'https://www.google.com/search?q=rmg+cutting',
+      isDestroyed: () => false,
+      isLoading: () => false,
+      stop: vi.fn(),
+      executeJavaScript: vi.fn(),
+      sendInputEvent: vi.fn()
+    };
+
+    const manager = new BrowserManager();
+    installManagedBrowser(manager, 12, webContents);
+    const token = manager.startMeasurementSession(12);
+
+    const clicked = await manager.clickControlledGoogleResult(
+      12,
+      'rmg cutting',
+      'seo-test.appareldiary.com',
+      'https://appareldiary.com/article/rmg-cutting',
+      token
+    );
+
+    expect(clicked).toBe(false);
+    expect(webContents.executeJavaScript).not.toHaveBeenCalled();
+    expect(webContents.sendInputEvent).not.toHaveBeenCalled();
+  });
+
+  it('limits controlled Keep Alive article hopping to the exact allowed host', async () => {
+    const clickedInside = vi.fn();
+    const clickedOutside = vi.fn();
+    const root = { scrollHeight: 600, clientHeight: 600 };
+
+    const inside = {
+      href: 'https://seo-test.appareldiary.com/article/next',
+      textContent: 'Next controlled test article',
+      target: '',
+      hasAttribute: () => false,
+      getAttribute: () => '',
+      closest: () => ({}),
+      querySelector: () => ({ innerText: 'Next controlled test article' }),
+      getBoundingClientRect: () => ({ width: 200, height: 30 }),
+      scrollIntoView: vi.fn(),
+      focus: vi.fn(),
+      click: clickedInside
+    };
+    const outside = {
+      ...inside,
+      href: 'https://appareldiary.com/article/production',
+      textContent: 'Production article',
+      click: clickedOutside
+    };
+
+    const location = { href: 'https://seo-test.appareldiary.com/article/current' };
+    const result = await vm.runInNewContext(
+      buildKeepAliveActionScript(
+        true,
+        [location.href],
+        'seo-test.appareldiary.com'
+      ),
+      {
+        window: {
+          innerHeight: 600,
+          scrollY: 0,
+          scrollTo: vi.fn(),
+          scrollBy: vi.fn()
+        },
+        document: {
+          scrollingElement: root,
+          documentElement: root,
+          body: { scrollHeight: 600 },
+          querySelectorAll: () => [outside, inside]
+        },
+        location,
+        URL,
+        performance: { now: () => 0 },
+        requestAnimationFrame: (cb: (time: number) => void) => cb(1000),
+        setTimeout: (cb: () => void) => {
+          cb();
+          return 1;
+        },
+        Promise,
+        Set,
+        Math
+      }
+    ) as { clickedUrl?: string };
+
+    expect(clickedOutside).not.toHaveBeenCalled();
+    expect(clickedInside).toHaveBeenCalledTimes(1);
+    expect(result.clickedUrl).toBe('https://seo-test.appareldiary.com/article/next');
+  });
+});
+
 describe('Google SEO measurement', () => {
   it('recognizes visible website + keyword text when Google splits domain and title markup', () => {
     const targetUrl = 'https://appareldiary.com/article/precision-and-profit-rmg-cutting';
