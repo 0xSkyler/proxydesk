@@ -193,6 +193,56 @@ describe('controlled test interaction', () => {
     expect(webContents.sendInputEvent).toHaveBeenCalled();
   });
 
+  it('uses the exact detected Google result URL as a final fallback if synthetic clicks are ignored', async () => {
+    const controlledHost = 'staging.example.com';
+    const targetUrl = `https://${controlledHost}/article/test`;
+    let currentUrl = 'https://www.google.com/search?q=test+article';
+
+    const webContents = {
+      getURL: () => currentUrl,
+      isDestroyed: () => false,
+      isLoading: () => false,
+      stop: vi.fn(),
+      executeJavaScript: vi.fn().mockImplementation(async (script: string) => {
+        if (script.includes('resultsScanned')) {
+          return {
+            blocked: false,
+            ready: true,
+            resultsScanned: 5,
+            observedResults: 5,
+            signature: 'stable',
+            match: {
+              url: targetUrl,
+              title: 'Test Article',
+              organicIndex: 0
+            }
+          };
+        }
+        return false;
+      }),
+      sendInputEvent: vi.fn(),
+      loadURL: vi.fn().mockImplementation(async (url: string) => {
+        currentUrl = url;
+      })
+    };
+
+    const manager = new BrowserManager();
+    installManagedBrowser(manager, 13, webContents);
+    const token = manager.startMeasurementSession(13);
+
+    const clicked = await manager.clickControlledGoogleResult(
+      13,
+      'test article',
+      controlledHost,
+      targetUrl,
+      token
+    );
+
+    expect(clicked).toBe(true);
+    expect(webContents.loadURL).toHaveBeenCalledWith(targetUrl);
+    expect(currentUrl).toBe(targetUrl);
+  });
+
   it('refuses a controlled click when the detected result host differs from the configured host', async () => {
     const webContents = {
       getURL: () => 'https://www.google.com/search?q=rmg+cutting',
