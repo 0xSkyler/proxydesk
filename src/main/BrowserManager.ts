@@ -528,9 +528,9 @@ export class BrowserManager extends EventEmitter {
     let lastSearchUrl = '';
 
     /**
-     * Load only enough of a Google result page to make the DOM available.
-     * We explicitly stop the remaining resource load; SEO scanning must never
-     * wait for a slow proxy to finish images/scripts after results are visible.
+     * Start Google navigation and return as soon as its DOM exists.
+     * Result detection runs while the page is still rendering; full network
+     * completion is never a prerequisite.
      */
     const loadSearchDom = async (url: string): Promise<void> => {
       let ready = false;
@@ -546,23 +546,23 @@ export class BrowserManager extends EventEmitter {
       });
 
       const deadline = Date.now() + 5_000;
-      while (Date.now() < deadline) {
-        const current = wc.getURL();
-        if (extractGoogleBlockContinueUrl(current)) break;
-        if (ready || (isGoogleSearchResultsUrl(current) && !wc.isLoading())) break;
-        if (loadError) break;
-        await delay(25);
+      try {
+        while (Date.now() < deadline) {
+          const current = wc.getURL();
+          if (extractGoogleBlockContinueUrl(current)) return;
+          if (ready || isGoogleSearchResultsUrl(current)) {
+            // A tiny paint grace is enough to begin text recognition. The
+            // scanner below keeps watching as more result blocks arrive.
+            await delay(60);
+            return;
+          }
+          if (loadError) break;
+          await delay(25);
+        }
+      } finally {
+        wc.removeListener('dom-ready', onDomReady);
       }
 
-      // Give Google's result markup time to begin painting, but never wait
-      // for the whole page/network waterfall. The previous 160 ms cut-off
-      // could freeze an incomplete result set and make the scanner race to
-      // later pages while the target was still arriving.
-      if (ready) await delay(900);
-      if (wc.isLoading()) wc.stop();
-      await delay(40);
-
-      wc.removeListener('dom-ready', onDomReady);
       if (loadError && !isGoogleSearchResultsUrl(wc.getURL())) {
         throw new Error(loadError);
       }
@@ -610,16 +610,41 @@ export class BrowserManager extends EventEmitter {
       let stableScans = 0;
       let zeroReadyScans = 0;
       let firstOrganicAt = 0;
-      const scanDeadline = Date.now() + 4_000;
+      const firstScanStartedAt = Date.now();
+      const scanDeadline = firstScanStartedAt + 5_000;
 
       while (Date.now() < scanDeadline) {
         try {
-          scan = (await wc.executeJavaScript(
-            buildGoogleResultScanScript(targetHost, query),
-            true
-          )) as GoogleResultScan;
+          const attempt = await Promise.race([
+            wc.executeJavaScript(
+              buildGoogleResultScanScript(targetHost, query),
+              true
+            ).then((value) => ({ kind: 'scan' as const, value })),
+            delay(250).then(() => ({ kind: 'timeout' as const }))
+          ]);
+
+          if (attempt.kind === 'timeout') {
+            // Some Electron/Google combinations delay script execution while
+            // the navigation is busy. Do not wait for the full page: after a
+            // short render window, stop only the remaining resources and
+            // continue scanning the DOM that is already visible.
+            if (wc.isLoading() && Date.now() - firstScanStartedAt >= 1_800) {
+              wc.stop();
+              await delay(40);
+            } else {
+              await delay(60);
+            }
+            continue;
+          }
+
+          scan = attempt.value as GoogleResultScan;
         } catch {
-          await delay(80);
+          if (wc.isLoading() && Date.now() - firstScanStartedAt >= 1_800) {
+            wc.stop();
+            await delay(40);
+          } else {
+            await delay(80);
+          }
           continue;
         }
 
@@ -665,6 +690,7 @@ export class BrowserManager extends EventEmitter {
       if (!scan.match) {
         // Only after the current organic result set is stable (or the full
         // scan window expires) is the next Google page allowed.
+        if (wc.isLoading()) wc.stop();
         continue;
       }
 
