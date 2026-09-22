@@ -159,7 +159,13 @@ export function SeoTrackerPanel(): JSX.Element {
           Rotate / Run Now
         </button>
         <button disabled={!running} onClick={() => void stop()}>
-          Stop
+          Stop SEO Tracker
+        </button>
+        <button onClick={() => void window.app.browser.setKeepAliveAll(true)}>
+          Keep Alive All
+        </button>
+        <button onClick={() => void window.app.browser.setKeepAliveAll(false)}>
+          Stop Keep Alive
         </button>
       </div>
 
