@@ -37,7 +37,7 @@ export interface BrowserBounds {
   height: number;
 }
 
-export type BroadcastSearchStatus = 'matched' | 'no-match' | 'blocked' | 'error';
+export type BroadcastSearchStatus = 'matched' | 'no-match' | 'paused' | 'monitoring' | 'error';
 
 export interface BroadcastSearchResult {
   browserId: number;
@@ -47,6 +47,10 @@ export interface BroadcastSearchResult {
   landedUrl?: string;
   /** Title of the result that matched, when status is 'matched'. */
   matchedTitle?: string;
+  /** Exact Google result destination detected during measurement. */
+  matchedUrl?: string;
+  /** True when this is a continuing observation rather than a terminal run. */
+  monitoring?: boolean;
   /** How many organic results were scanned before finding a match (or not). */
   resultsScanned?: number;
   position?: number;
