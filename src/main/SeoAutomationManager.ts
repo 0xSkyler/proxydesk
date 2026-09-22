@@ -372,6 +372,8 @@ export class SeoAutomationManager extends EventEmitter {
     maxPages: number
   ): Promise<void> {
     const observationIntervalMs = 30_000;
+    const interactionHost = controlledTestHost || normalizeTargetHost(targetWebsite);
+    if (!interactionHost) return;
 
     while (
       this.isCurrent(generation) &&
@@ -423,7 +425,7 @@ export class SeoAutomationManager extends EventEmitter {
         result.interactionStatus === 'opened' &&
         result.matchedUrl
       ) {
-        this.browserManager.startControlledKeepAlive(browserId, controlledTestHost);
+        this.browserManager.startControlledKeepAlive(browserId, interactionHost);
         this.emit('seoResult', {
           cycleNumber,
           result: {
@@ -454,13 +456,13 @@ export class SeoAutomationManager extends EventEmitter {
           matchedHost = '';
         }
 
-        if (matchedHost !== controlledTestHost) {
+        if (matchedHost !== interactionHost) {
           this.emit('seoResult', {
             cycleNumber,
             result: {
               ...result,
               interactionStatus: 'click-failed',
-              error: `Matched result host ${matchedHost || 'unknown'} does not equal configured interaction host ${controlledTestHost}.`
+              error: `Matched result host ${matchedHost || 'unknown'} does not equal configured interaction host ${interactionHost}.`
             }
           });
           await sleep(3_000);
@@ -478,13 +480,13 @@ export class SeoAutomationManager extends EventEmitter {
         const clicked = await this.browserManager.clickControlledGoogleResult(
           browserId,
           query,
-          controlledTestHost,
+          interactionHost,
           result.matchedUrl,
           measurementToken
         );
 
         if (clicked) {
-          this.browserManager.startControlledKeepAlive(browserId, controlledTestHost);
+          this.browserManager.startControlledKeepAlive(browserId, interactionHost);
           this.emit('seoResult', {
             cycleNumber,
             result: {
