@@ -1,16 +1,25 @@
+# v0.5.1 click-handoff verification
 name: Build Windows Installer
 
 on:
   push:
-    branches: [main]
-    tags: ['v*']
+    branches:
+      - main
+      - feature/seo-click-handoff-0.5.1
+    tags:
+      - 'v*'
   pull_request:
-    branches: [main]
-  workflow_dispatch: {}
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   build:
     runs-on: windows-latest
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -19,7 +28,7 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '20'
-          cache: 'npm'
+          cache: npm
 
       - name: Install dependencies
         run: npm ci
@@ -33,21 +42,32 @@ jobs:
       - name: Run tests
         run: npm test
 
+      - name: Smoke check ProxyScrape public API
+        shell: pwsh
+        run: |
+          $url = "https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&proxy_format=protocolipport&format=text&limit=25&timeout=4000"
+          $response = Invoke-WebRequest -UseBasicParsing -Uri $url -TimeoutSec 20
+          if ($response.StatusCode -ne 200) {
+            throw "ProxyScrape API returned HTTP $($response.StatusCode)"
+          }
+          $body = [string]$response.Content
+          if ($body -notmatch '(?m)^(?:(?:http|https|socks4|socks5)://)?[^\s:]+:\d+\s*$') {
+            throw "ProxyScrape API did not return parseable proxy entries."
+          }
+          Write-Host "ProxyScrape API smoke check passed."
+
       - name: Build renderer + main
         run: npm run build
 
       - name: Package Windows installer
         run: npm run package:win
         env:
-          # electron-builder does not need GH_TOKEN unless publishing; we
-          # upload the artifact via actions/upload-artifact instead (see
-          # below) and only create a GitHub Release on a version tag.
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
 
       - name: Upload installer artifact
         uses: actions/upload-artifact@v4
         with:
-          name: MultiBrowserProxySetup-windows
+          name: ProxyDesk-v0.5.1-windows
           path: release/MultiBrowserProxySetup.exe
           if-no-files-found: error
 
