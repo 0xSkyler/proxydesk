@@ -23,6 +23,9 @@ export interface BrowserState {
   lastIpCheckAt?: string;
   errorMessage?: string;
   crashCount: number;
+  keepAliveEnabled: boolean;
+  keepAliveHops: number;
+  lastKeepAliveAt?: string;
   title?: string;
   faviconUrl?: string;
 }
@@ -34,7 +37,7 @@ export interface BrowserBounds {
   height: number;
 }
 
-export type BroadcastSearchStatus = 'matched' | 'no-match' | 'blocked' | 'error';
+export type BroadcastSearchStatus = 'matched' | 'no-match' | 'paused' | 'monitoring' | 'error';
 
 export interface BroadcastSearchResult {
   browserId: number;
@@ -44,8 +47,17 @@ export interface BroadcastSearchResult {
   landedUrl?: string;
   /** Title of the result that matched, when status is 'matched'. */
   matchedTitle?: string;
+  /** Exact Google result destination detected during measurement. */
+  matchedUrl?: string;
+  /** True when this is a continuing observation rather than a terminal run. */
+  monitoring?: boolean;
+  /** Post-detection interaction state for the matched result. */
+  interactionStatus?: 'detected' | 'opening' | 'opened' | 'click-failed';
   /** How many organic results were scanned before finding a match (or not). */
   resultsScanned?: number;
+  position?: number;
+  resultPage?: number;
+  keepAliveStarted?: boolean;
   error?: string;
   ranAt: string;
 }
