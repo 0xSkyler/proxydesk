@@ -259,6 +259,12 @@ p {
   white-space: nowrap;
 }
 
+.browser-keepalive-button {
+  padding: 4px 7px;
+  font-size: 10px;
+  white-space: nowrap;
+}
+
 .browser-card__viewport {
   height: 360px;
   background: #fff;
