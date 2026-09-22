@@ -9,6 +9,8 @@ export interface AppApi {
   browser: {
     getAll(): Promise<BrowserState[]>;
     setBounds(id: number, bounds: BrowserBounds): Promise<void>;
+    setKeepAlive(id: number, enabled: boolean): Promise<void>;
+    setKeepAliveAll(enabled: boolean): Promise<void>;
     onStateChanged(cb: (state: BrowserState) => void): () => void;
   };
   automation: {
@@ -24,6 +26,8 @@ export interface AppApi {
 export const IPC_CHANNELS = {
   browserGetAll: 'browser:getAll',
   browserSetBounds: 'browser:setBounds',
+  browserSetKeepAlive: 'browser:setKeepAlive',
+  browserSetKeepAliveAll: 'browser:setKeepAliveAll',
   browserStateChanged: 'browser:stateChanged',
 
   automationGetState: 'automation:getState',
