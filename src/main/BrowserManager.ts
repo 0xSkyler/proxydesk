@@ -132,6 +132,7 @@ export class BrowserManager extends EventEmitter {
   private keepAliveIntervalMs = 60_000;
   private keepAliveMaxHops = 25;
   private keepAliveFollowLinks = true;
+  private measurementTokens = new Map<number, number>();
 
   attachWindow(window: BrowserWindow): void {
     this.window = window;
@@ -493,11 +494,28 @@ export class BrowserManager extends EventEmitter {
    *
    * This keeps SEO measurement separate from generated site engagement.
    */
+  startMeasurementSession(id: number): number {
+    const token = (this.measurementTokens.get(id) ?? 0) + 1;
+    this.measurementTokens.set(id, token);
+    return token;
+  }
+
+  cancelMeasurementSession(id: number): void {
+    this.measurementTokens.set(id, (this.measurementTokens.get(id) ?? 0) + 1);
+    const managed = this.browsers.get(id);
+    if (managed && !managed.view.webContents.isDestroyed()) managed.view.webContents.stop();
+  }
+
+  isMeasurementSessionCurrent(id: number, token: number): boolean {
+    return this.measurementTokens.get(id) === token;
+  }
+
   async broadcastSearch(
     id: number,
     query: string,
     targetWebsite: string,
-    maxPages = 20
+    maxPages = 20,
+    measurementToken?: number
   ): Promise<BroadcastSearchResult> {
     const managed = this.get(id);
     const wc = managed.view.webContents;
@@ -559,6 +577,19 @@ export class BrowserManager extends EventEmitter {
     };
 
     for (let pageIndex = 0; pageIndex < pagesToScan; pageIndex += 1) {
+      if (
+        measurementToken != null &&
+        !this.isMeasurementSessionCurrent(id, measurementToken)
+      ) {
+        return {
+          browserId: id,
+          status: 'monitoring',
+          landedUrl: wc.getURL(),
+          monitoring: true,
+          ranAt
+        };
+      }
+
       const searchUrl = buildGoogleSearchUrl(query, pageIndex);
       lastSearchUrl = searchUrl;
 
@@ -605,6 +636,20 @@ export class BrowserManager extends EventEmitter {
       const scanDeadline = firstScanStartedAt + 5_000;
 
       while (Date.now() < scanDeadline) {
+        if (
+          measurementToken != null &&
+          !this.isMeasurementSessionCurrent(id, measurementToken)
+        ) {
+          return {
+            browserId: id,
+            status: 'monitoring',
+            landedUrl: wc.getURL(),
+            resultsScanned: totalScanned,
+            monitoring: true,
+            ranAt
+          };
+        }
+
         try {
           const attempt = await Promise.race([
             wc.executeJavaScript(
