@@ -27,8 +27,9 @@ export declare interface SeoAutomationManager {
  * Single-purpose SEO Tracker orchestration:
  *
  * ProxyScrape free API -> local validation -> immediate exclusive assignment
- * -> Google result-page scan -> matched result click -> Keep Alive
- * -> rotate and repeat on the user-configured cadence.
+ * -> continuous Google monitoring -> challenge pause/resume
+ * -> optional controlled-test result click -> repeating same-host Keep Alive
+ * -> rotate and restart on the user-configured cadence.
  */
 // eslint-disable-next-line @typescript-eslint/no-unsafe-declaration-merging
 export class SeoAutomationManager extends EventEmitter {
@@ -73,8 +74,19 @@ export class SeoAutomationManager extends EventEmitter {
   async start(config: SeoAutomationConfig): Promise<SeoAutomationState> {
     const query = config.query.trim();
     const targetWebsite = config.targetWebsite.trim();
+    const targetHost = normalizeTargetHost(targetWebsite);
+    const controlledTestHost = normalizeTargetHost(config.controlledTestHost ?? '');
     if (!query) throw new Error('Enter a Google search keyword.');
-    if (!normalizeTargetHost(targetWebsite)) throw new Error('Enter a valid target website or site name.');
+    if (!targetHost) throw new Error('Enter a valid target website or site name.');
+
+    if (controlledTestHost) {
+      if (controlledTestHost !== targetHost) {
+        throw new Error('Controlled test host must exactly match the Target website host.');
+      }
+      if (controlledTestHost === 'appareldiary.com') {
+        throw new Error('The production host appareldiary.com cannot be used for autonomous controlled-test clicking. Use a dedicated test/staging hostname.');
+      }
+    }
 
     const browserCount = normalizeBrowserCount(config.browserCount);
     const maxPages = normalizeSeoMaxPages(config.maxPages);
@@ -94,6 +106,7 @@ export class SeoAutomationManager extends EventEmitter {
       proxySource: 'ProxyScrape Free API',
       query,
       targetWebsite,
+      controlledTestHost: controlledTestHost || undefined,
       intervalSec,
       browserCount,
       maxPages,
@@ -212,7 +225,7 @@ export class SeoAutomationManager extends EventEmitter {
     const generation = this.generation;
     const cycleNumber = this.state.cycleNumber + 1;
     const browserIds = [...this.state.browserIds];
-    const { query, targetWebsite, maxPages } = this.state;
+    const { query, targetWebsite, controlledTestHost, maxPages } = this.state;
 
     this.state = {
       ...this.state,
@@ -250,6 +263,7 @@ export class SeoAutomationManager extends EventEmitter {
               assignment,
               query,
               targetWebsite,
+              controlledTestHost,
               maxPages
             )
           );
@@ -307,6 +321,7 @@ export class SeoAutomationManager extends EventEmitter {
     assignment: ProxyAssignment,
     query: string,
     targetWebsite: string,
+    controlledTestHost: string | undefined,
     maxPages: number
   ): Promise<void> {
     if (!assignment.proxy || !this.isCurrent(generation)) return;
@@ -329,6 +344,7 @@ export class SeoAutomationManager extends EventEmitter {
         measurementToken,
         query,
         targetWebsite,
+        controlledTestHost,
         maxPages
       );
     } catch (err) {
@@ -353,6 +369,7 @@ export class SeoAutomationManager extends EventEmitter {
     measurementToken: number,
     query: string,
     targetWebsite: string,
+    controlledTestHost: string | undefined,
     maxPages: number
   ): Promise<void> {
     const observationIntervalMs = 30_000;
@@ -403,6 +420,37 @@ export class SeoAutomationManager extends EventEmitter {
       }
 
       this.emit('seoResult', { cycleNumber, result });
+
+      if (
+        result.status === 'matched' &&
+        controlledTestHost &&
+        result.matchedUrl
+      ) {
+        let matchedHost = '';
+        try {
+          matchedHost = new URL(result.matchedUrl).hostname
+            .toLowerCase()
+            .replace(/^www\./, '')
+            .replace(/\.$/, '');
+        } catch {
+          matchedHost = '';
+        }
+
+        if (matchedHost === controlledTestHost) {
+          const clicked = await this.browserManager.clickControlledGoogleResult(
+            browserId,
+            query,
+            controlledTestHost,
+            result.matchedUrl,
+            measurementToken
+          );
+
+          if (clicked) {
+            this.browserManager.startControlledKeepAlive(browserId, controlledTestHost);
+            return;
+          }
+        }
+      }
 
       if (result.status === 'paused') {
         // Keep the same browser, proxy, cookies, and Google session. We do not
