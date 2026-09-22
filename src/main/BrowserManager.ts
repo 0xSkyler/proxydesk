@@ -888,14 +888,16 @@ export class BrowserManager extends EventEmitter {
     const canHop = this.keepAliveFollowLinks && pagesVisited < this.keepAliveMaxHops;
 
     try {
-      const result = (await wc.executeJavaScript(buildKeepAliveActionScript(canHop), true)) as {
-        links?: string[];
+      const result = (await wc.executeJavaScript(
+        buildKeepAliveActionScript(canHop, Array.from(managed.keepAliveVisited)),
+        true
+      )) as {
+        clickedUrl?: string;
       };
 
       const completedAt = new Date().toISOString();
 
-      // The current page has now completed its 6–8 full slow down/up cycles.
-      // If the central page limit is reached, stop this browser's run.
+      // The current page has now completed exactly two full down/up cycles.
       if (pagesVisited >= this.keepAliveMaxHops) {
         managed.keepAliveEnabled = false;
         this.updateState(managed, {
@@ -906,8 +908,7 @@ export class BrowserManager extends EventEmitter {
         return;
       }
 
-      const candidates = (result.links ?? []).filter((url) => !managed.keepAliveVisited.has(url));
-      if (!canHop || candidates.length === 0) {
+      if (!canHop || !result.clickedUrl) {
         managed.keepAliveEnabled = false;
         this.updateState(managed, {
           lastKeepAliveAt: completedAt,
@@ -917,9 +918,7 @@ export class BrowserManager extends EventEmitter {
         return;
       }
 
-      const nextUrl = candidates[Math.floor(Math.random() * candidates.length)];
-      managed.keepAliveVisited.add(nextUrl);
-      await wc.loadURL(nextUrl);
+      managed.keepAliveVisited.add(result.clickedUrl);
       managed.keepAliveHops += 1;
       this.updateState(managed, {
         keepAliveEnabled: true,
@@ -938,8 +937,9 @@ export class BrowserManager extends EventEmitter {
   }
 }
 
-export function buildKeepAliveActionScript(allowHop: boolean): string {
+export function buildKeepAliveActionScript(allowHop: boolean, visitedUrls: string[] = []): string {
   return `(async () => {
+    const visited = new Set(${JSON.stringify(visitedUrls)});
     const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
     const root = document.scrollingElement || document.documentElement || document.body;
     const pageHeight = () => Math.max(
@@ -972,7 +972,7 @@ export function buildKeepAliveActionScript(allowHop: boolean): string {
         requestAnimationFrame(frame);
       });
 
-    const cycles = 6 + Math.floor(Math.random() * 3); // 6, 7 or 8
+    const cycles = 2;
     if (maxScroll() > 0) {
       // Immediate visible feedback, then the requested full cycles.
       window.scrollTo(0, Math.min(180, maxScroll()));
@@ -999,13 +999,13 @@ export function buildKeepAliveActionScript(allowHop: boolean): string {
       }
     }
 
-    if (!${allowHop ? 'true' : 'false'}) return { links: [] };
+    if (!${allowHop ? 'true' : 'false'}) return {};
 
-    const blocked = /(login|log-in|logout|sign-in|signin|signup|register|account|cart|basket|checkout|payment|subscribe|privacy|terms|contact|download|delete|remove|admin|wp-admin|wp-login)/i;
+    const blocked = /(login|log-in|logout|sign-in|signin|signup|register|account|cart|basket|checkout|payment|subscribe|privacy|terms|contact|download|delete|remove|admin|wp-admin|wp-login|author|tag|category)/i;
     const currentUrl = new URL(location.href);
     const currentHost = currentUrl.hostname.toLowerCase().replace(/^www\\./, '');
     const seen = {};
-    const links = [];
+    const candidates = [];
 
     Array.from(document.querySelectorAll('a[href]')).forEach((anchor) => {
       try {
@@ -1014,29 +1014,55 @@ export function buildKeepAliveActionScript(allowHop: boolean): string {
         if (rel.includes('sponsored') || rel.includes('nofollow sponsored')) return;
 
         const text = (anchor.textContent || '').trim();
-        if (text.length < 5 || blocked.test(text)) return;
+        if (text.length < 6 || blocked.test(text)) return;
 
         const url = new URL(anchor.href, location.href);
         if (!/^https?:$/.test(url.protocol)) return;
 
         const host = url.hostname.toLowerCase().replace(/^www\\./, '');
         if (host !== currentHost) return;
-        if (url.href === currentUrl.href || blocked.test(url.pathname + url.search)) return;
-
-        const rect = anchor.getBoundingClientRect();
-        if (rect.width <= 0 || rect.height <= 0) return;
 
         url.hash = '';
         const normalized = url.href;
+        if (normalized === currentUrl.href || visited.has(normalized)) return;
+        if (blocked.test(url.pathname + url.search)) return;
         if (seen[normalized]) return;
         seen[normalized] = true;
-        links.push(normalized);
+
+        // Favor article-looking links, but keep a same-site content fallback.
+        var score = 0;
+        if (/\\/(article|blog|post|news|story)\\//i.test(url.pathname)) score += 100;
+        if (anchor.closest && anchor.closest('article')) score += 80;
+        if (anchor.querySelector && anchor.querySelector('h1,h2,h3,h4')) score += 60;
+        if (text.length >= 20) score += 30;
+        if (url.pathname.split('/').filter(Boolean).length >= 2) score += 20;
+
+        const rect = anchor.getBoundingClientRect();
+        if (rect.width > 1 && rect.height > 1) score += 10;
+
+        candidates.push({ anchor, url: normalized, score });
       } catch (_) {
         // Ignore malformed/non-web anchors.
       }
     });
 
-    return { links: links.slice(0, 100) };
+    if (!candidates.length) return {};
+
+    candidates.sort((a, b) => b.score - a.score);
+    const topScore = candidates[0].score;
+    const top = candidates.filter((candidate) => candidate.score >= topScore - 15);
+    const chosen = top[Math.floor(Math.random() * top.length)];
+
+    try {
+      chosen.anchor.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'auto' });
+      await wait(250);
+      chosen.anchor.target = '_self';
+      chosen.anchor.focus({ preventScroll: true });
+      chosen.anchor.click();
+      return { clickedUrl: chosen.url };
+    } catch (_) {
+      return {};
+    }
   })()`;
 }
 
