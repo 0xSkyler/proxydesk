@@ -5,6 +5,8 @@ import type { AppApi } from '../shared/types/ipc';
 const IPC_CHANNELS = {
   browserGetAll: 'browser:getAll',
   browserSetBounds: 'browser:setBounds',
+  browserSetKeepAlive: 'browser:setKeepAlive',
+  browserSetKeepAliveAll: 'browser:setKeepAliveAll',
   browserStateChanged: 'browser:stateChanged',
   automationGetState: 'automation:getState',
   automationStart: 'automation:start',
@@ -18,6 +20,8 @@ const api: AppApi = {
   browser: {
     getAll: () => ipcRenderer.invoke(IPC_CHANNELS.browserGetAll),
     setBounds: (id, bounds) => ipcRenderer.invoke(IPC_CHANNELS.browserSetBounds, id, bounds),
+    setKeepAlive: (id, enabled) => ipcRenderer.invoke(IPC_CHANNELS.browserSetKeepAlive, id, enabled),
+    setKeepAliveAll: (enabled) => ipcRenderer.invoke(IPC_CHANNELS.browserSetKeepAliveAll, enabled),
     onStateChanged: (cb) => {
       const listener = (_event: Electron.IpcRendererEvent, state: Parameters<typeof cb>[0]) => cb(state);
       ipcRenderer.on(IPC_CHANNELS.browserStateChanged, listener);
