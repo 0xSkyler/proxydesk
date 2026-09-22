@@ -233,6 +233,7 @@ export class SeoAutomationManager extends EventEmitter {
       // Every rotation starts from a clean browser routing state.
       for (const id of browserIds) {
         if (!this.isCurrent(generation)) return;
+        this.browserManager.cancelMeasurementSession(id);
         this.browserManager.setBrowserKeepAlive(id, false, false);
         await this.browserManager.assignProxy(id, null);
       }
@@ -314,23 +315,21 @@ export class SeoAutomationManager extends EventEmitter {
       await this.browserManager.assignProxy(browserId, proxy);
       if (!this.isCurrent(generation)) return;
 
-      const result = await this.browserManager.broadcastSearch(
+      this.browserManager.setBrowserKeepAlive(browserId, false, false);
+      const measurementToken = this.browserManager.startMeasurementSession(browserId);
+
+      // Run the measurement loop independently of proxy validation. Each
+      // browser keeps observing for the lifetime of this proxy cycle and is
+      // invalidated as soon as the next rotation begins.
+      void this.monitorBrowserSession(
+        generation,
+        cycleNumber,
         browserId,
+        measurementToken,
         query,
         targetWebsite,
         maxPages
       );
-
-      if (!this.isCurrent(generation)) {
-        this.browserManager.setBrowserKeepAlive(browserId, false, false);
-        return;
-      }
-
-      if (result.status !== 'matched') {
-        this.browserManager.setBrowserKeepAlive(browserId, false, false);
-      }
-
-      this.emit('seoResult', { cycleNumber, result });
     } catch (err) {
       if (!this.isCurrent(generation)) return;
       this.browserManager.setBrowserKeepAlive(browserId, false, false);
@@ -346,7 +345,90 @@ export class SeoAutomationManager extends EventEmitter {
     }
   }
 
+  private async monitorBrowserSession(
+    generation: number,
+    cycleNumber: number,
+    browserId: number,
+    measurementToken: number,
+    query: string,
+    targetWebsite: string,
+    maxPages: number
+  ): Promise<void> {
+    const observationIntervalMs = 30_000;
+
+    while (
+      this.isCurrent(generation) &&
+      this.state.cycleNumber === cycleNumber &&
+      this.browserManager.isMeasurementSessionCurrent(browserId, measurementToken)
+    ) {
+      let result;
+      try {
+        result = await this.browserManager.broadcastSearch(
+          browserId,
+          query,
+          targetWebsite,
+          maxPages,
+          measurementToken
+        );
+      } catch (err) {
+        if (
+          !this.isCurrent(generation) ||
+          this.state.cycleNumber !== cycleNumber ||
+          !this.browserManager.isMeasurementSessionCurrent(browserId, measurementToken)
+        ) {
+          return;
+        }
+
+        this.emit('seoResult', {
+          cycleNumber,
+          result: {
+            browserId,
+            status: 'error',
+            error: (err as Error).message,
+            monitoring: true,
+            ranAt: new Date().toISOString()
+          }
+        });
+        await sleep(5_000);
+        continue;
+      }
+
+      if (
+        !this.isCurrent(generation) ||
+        this.state.cycleNumber !== cycleNumber ||
+        !this.browserManager.isMeasurementSessionCurrent(browserId, measurementToken)
+      ) {
+        return;
+      }
+
+      this.emit('seoResult', { cycleNumber, result });
+
+      if (result.status === 'paused') {
+        // Keep the same browser, proxy, cookies, and Google session. We do not
+        // solve or bypass the challenge; we simply wait for normal results to
+        // return, then resume the saved keyword/website measurement.
+        const recovered = await this.browserManager.waitForGoogleRecovery(
+          browserId,
+          observationIntervalMs
+        );
+
+        if (!recovered) {
+          await sleep(1_000);
+        }
+        continue;
+      }
+
+      // Matched and no-match observations are measurements, not terminal
+      // states. Recheck periodically until the next proxy rotation.
+      await sleep(observationIntervalMs);
+    }
+  }
+
   private isCurrent(generation: number): boolean {
     return this.state.running && generation === this.generation;
   }
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
