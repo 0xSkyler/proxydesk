@@ -66,6 +66,29 @@ describe('browser session isolation', () => {
   });
 });
 
+describe('Keep Alive controls', () => {
+  it('can be started and stopped explicitly for an individual browser', async () => {
+    const webContents = {
+      getURL: () => 'https://appareldiary.com/article/test',
+      isDestroyed: () => false,
+      isLoading: () => true
+    };
+
+    const manager = new BrowserManager();
+    installManagedBrowser(manager, 9, webContents);
+
+    manager.setBrowserKeepAlive(9, true, true);
+    expect(manager.getAll().find((browser) => browser.id === 9)?.keepAliveEnabled).toBe(true);
+
+    manager.setBrowserKeepAlive(9, false, false);
+    expect(manager.getAll().find((browser) => browser.id === 9)?.keepAliveEnabled).toBe(false);
+
+    await Promise.resolve();
+    const internals = manager as unknown as { keepAliveTimer: NodeJS.Timeout | null };
+    if (internals.keepAliveTimer) clearInterval(internals.keepAliveTimer);
+  });
+});
+
 describe('Google SEO page scanning', () => {
   it('matches screenshot-style Google markup where domain and article title share a result card', () => {
     const targetUrl = 'https://appareldiary.com/article/rmg-cutting';
@@ -187,6 +210,87 @@ describe('Google SEO page scanning', () => {
     expect(result.status).toBe('matched');
     expect(result.resultPage).toBe(1);
     expect(result.keepAliveStarted).toBe(true);
+
+    const internals = manager as unknown as { keepAliveTimer: NodeJS.Timeout | null };
+    if (internals.keepAliveTimer) clearInterval(internals.keepAliveTimer);
+  });
+
+  it('waits on the same Google page when the target appears after the first partial render', async () => {
+    const targetUrl = 'https://appareldiary.com/article/rmg-cutting';
+    let currentUrl = 'about:blank';
+    let loading = false;
+    let scans = 0;
+    const handlers = new Map<string, Set<() => void>>();
+
+    const emit = (event: string) => {
+      for (const handler of handlers.get(event) ?? []) handler();
+    };
+
+    const loadURL = vi.fn().mockImplementation((url: string) => {
+      currentUrl = url;
+      loading = true;
+      setTimeout(() => emit('dom-ready'), 5);
+      return new Promise<void>(() => undefined);
+    });
+
+    const executeJavaScript = vi.fn().mockImplementation(async (script: string) => {
+      if (!script.includes('resultsScanned')) return { links: [] };
+      scans += 1;
+
+      if (scans < 4) {
+        return {
+          blocked: false,
+          ready: true,
+          resultsScanned: 3,
+          observedResults: 3,
+          signature: 'partial-' + scans
+        };
+      }
+
+      return {
+        blocked: false,
+        ready: true,
+        resultsScanned: 7,
+        observedResults: 7,
+        signature: 'full-set',
+        match: {
+          url: targetUrl,
+          title: 'RMG Cutting Process: A Stage-by-Stage Control Guide',
+          organicIndex: 2,
+          clickPoint: { x: 240, y: 290 }
+        }
+      };
+    });
+
+    const webContents = {
+      loadURL,
+      getURL: () => currentUrl,
+      isDestroyed: () => false,
+      isLoading: () => loading,
+      on: (event: string, handler: () => void) => {
+        const set = handlers.get(event) ?? new Set<() => void>();
+        set.add(handler);
+        handlers.set(event, set);
+      },
+      removeListener: (event: string, handler: () => void) => handlers.get(event)?.delete(handler),
+      stop: () => {
+        loading = false;
+      },
+      executeJavaScript,
+      sendInputEvent: vi.fn((event: { type: string }) => {
+        if (event.type === 'mouseUp') currentUrl = targetUrl;
+      })
+    };
+
+    const manager = new BrowserManager();
+    installManagedBrowser(manager, 3, webContents);
+
+    const result = await manager.broadcastSearch(3, 'rmg cutting', 'appareldiary.com', 20);
+
+    expect(scans).toBeGreaterThanOrEqual(4);
+    expect(loadURL).toHaveBeenCalledTimes(1);
+    expect(result.status).toBe('matched');
+    expect(result.resultPage).toBe(1);
 
     const internals = manager as unknown as { keepAliveTimer: NodeJS.Timeout | null };
     if (internals.keepAliveTimer) clearInterval(internals.keepAliveTimer);
