@@ -1,11 +1,11 @@
-# v0.5.1 click-handoff verification
+# v0.5.2 live-observer verification
 name: Build Windows Installer
 
 on:
   push:
     branches:
       - main
-      - feature/seo-click-handoff-0.5.1
+      - feature/google-observer-click-0.5.2
     tags:
       - 'v*'
   pull_request:
@@ -67,7 +67,7 @@ jobs:
       - name: Upload installer artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ProxyDesk-v0.5.1-windows
+          name: ProxyDesk-v0.5.2-windows
           path: release/MultiBrowserProxySetup.exe
           if-no-files-found: error
 
