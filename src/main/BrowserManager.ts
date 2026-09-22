@@ -554,11 +554,13 @@ export class BrowserManager extends EventEmitter {
         await delay(25);
       }
 
-      // Give Google's server-rendered result markup a small paint window,
-      // then release executeJavaScript by cancelling unfinished subresources.
-      if (ready) await delay(160);
+      // Give Google's result markup time to begin painting, but never wait
+      // for the whole page/network waterfall. The previous 160 ms cut-off
+      // could freeze an incomplete result set and make the scanner race to
+      // later pages while the target was still arriving.
+      if (ready) await delay(900);
       if (wc.isLoading()) wc.stop();
-      await delay(25);
+      await delay(40);
 
       wc.removeListener('dom-ready', onDomReady);
       if (loadError && !isGoogleSearchResultsUrl(wc.getURL())) {
@@ -593,9 +595,23 @@ export class BrowserManager extends EventEmitter {
       }
 
       // After stop(), script execution is no longer queued behind Google's
-      // unfinished network load. Scan the current page immediately.
-      let scan: GoogleResultScan = { blocked: false, ready: false, resultsScanned: 0 };
-      const scanDeadline = Date.now() + 1_500;
+      // unfinished network load. Keep rescanning this SAME page while the
+      // organic result set settles. Never paginate merely because header or
+      // footer anchors exist.
+      let scan: GoogleResultScan = {
+        blocked: false,
+        ready: false,
+        resultsScanned: 0,
+        observedResults: 0,
+        signature: ''
+      };
+      let pageMaxObserved = 0;
+      let lastSignature = '';
+      let stableScans = 0;
+      let zeroReadyScans = 0;
+      let firstOrganicAt = 0;
+      const scanDeadline = Date.now() + 4_000;
+
       while (Date.now() < scanDeadline) {
         try {
           scan = (await wc.executeJavaScript(
@@ -603,7 +619,7 @@ export class BrowserManager extends EventEmitter {
             true
           )) as GoogleResultScan;
         } catch {
-          await delay(50);
+          await delay(80);
           continue;
         }
 
@@ -617,14 +633,38 @@ export class BrowserManager extends EventEmitter {
           };
         }
 
-        if (scan.match || scan.ready) break;
-        await delay(60);
+        pageMaxObserved = Math.max(pageMaxObserved, scan.observedResults || scan.resultsScanned || 0);
+
+        // A target wins immediately, even if the rest of the page is still
+        // rendering.
+        if (scan.match) break;
+
+        if (scan.observedResults > 0) {
+          if (!firstOrganicAt) firstOrganicAt = Date.now();
+          if (scan.signature && scan.signature === lastSignature) {
+            stableScans += 1;
+          } else {
+            lastSignature = scan.signature;
+            stableScans = 1;
+          }
+
+          // Require several identical snapshots over time before declaring
+          // the page a real no-match. This prevents page 1 -> page 20 races.
+          if (stableScans >= 6 && Date.now() - firstOrganicAt >= 1_000) break;
+        } else if (scan.ready) {
+          zeroReadyScans += 1;
+          // A genuinely empty/omitted-results page may have no organic links.
+          // Still wait multiple scans before moving on.
+          if (zeroReadyScans >= 8) break;
+        }
+
+        await delay(140);
       }
 
-      totalScanned += scan.resultsScanned;
+      totalScanned += pageMaxObserved;
       if (!scan.match) {
-        // The page was genuinely scanned and contained no target. Only now
-        // may the next Google result page be requested.
+        // Only after the current organic result set is stable (or the full
+        // scan window expires) is the next Google page allowed.
         continue;
       }
 
@@ -1143,6 +1183,7 @@ export function buildGoogleResultScanScript(targetHost: string): string {
       // links render far earlier than the organic result set.
       var organicSeen = {};
       var organicSnapshot = [];
+      var organicUrls = [];
       for (var s = 0; s < anchors.length; s += 1) {
         var candidate = anchors[s];
         var candidateHref = unwrap(candidate.getAttribute('href') || candidate.href || '');
@@ -1160,6 +1201,7 @@ export function buildGoogleResultScanScript(targetHost: string): string {
         if (organicSeen[snapshotKey]) continue;
         organicSeen[snapshotKey] = true;
         organicSnapshot.push(snapshotKey);
+        organicUrls.push(candidateHref.split('#')[0]);
       }
 
       var observedResults = organicSnapshot.length;
@@ -1184,7 +1226,8 @@ export function buildGoogleResultScanScript(targetHost: string): string {
         var rect = elementRect(anchor);
         if (!rect) continue;
 
-        resultsScanned += 1;
+        var organicIndex = organicUrls.indexOf(anchorDestination.split('#')[0]);
+        if (organicIndex < 0) organicIndex = 0;
         return {
           blocked: false,
           ready: true,
@@ -1194,7 +1237,7 @@ export function buildGoogleResultScanScript(targetHost: string): string {
           match: {
             url: anchorDestination,
             title: titleText,
-            organicIndex: resultsScanned - 1,
+            organicIndex: organicIndex,
             clickPoint: {
               x: rect.left + Math.min(rect.width / 2, Math.max(12, rect.width - 12)),
               y: rect.top + rect.height / 2
@@ -1222,7 +1265,8 @@ export function buildGoogleResultScanScript(targetHost: string): string {
         var fallbackTitle = ((fallbackTitleNode && fallbackTitleNode.innerText) || fallbackAnchor.getAttribute('aria-label') || fallbackAnchor.innerText || '').trim();
         fallbackAnchor.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'auto' });
         fallbackRect = elementRect(fallbackAnchor) || fallbackRect;
-        resultsScanned += 1;
+        var fallbackIndex = organicUrls.indexOf(fallbackDestination.split('#')[0]);
+        if (fallbackIndex < 0) fallbackIndex = 0;
         return {
           blocked: false,
           ready: true,
@@ -1232,7 +1276,7 @@ export function buildGoogleResultScanScript(targetHost: string): string {
           match: {
             url: fallbackDestination,
             title: fallbackTitle,
-            organicIndex: resultsScanned - 1,
+            organicIndex: fallbackIndex,
             clickPoint: {
               x: fallbackRect.left + Math.min(fallbackRect.width / 2, Math.max(12, fallbackRect.width - 12)),
               y: fallbackRect.top + fallbackRect.height / 2
