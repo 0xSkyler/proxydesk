@@ -1017,6 +1017,8 @@ interface GoogleResultScan {
   blocked: boolean;
   ready: boolean;
   resultsScanned: number;
+  observedResults: number;
+  signature: string;
   match?: {
     url: string;
     title: string;
@@ -1031,12 +1033,12 @@ export function buildGoogleResultScanScript(targetHost: string): string {
       var target = ${JSON.stringify(targetHost.toLowerCase())};
       var loc = window.location.href;
       if (/\\/sorry\\/|consent\\.google\\./.test(loc)) {
-        return { blocked: true, ready: true, resultsScanned: 0 };
+        return { blocked: true, ready: true, resultsScanned: 0, observedResults: 0, signature: '' };
       }
 
       var bodyText = (document.body && document.body.innerText) || '';
       if (/unusual traffic|not a robot|recaptcha/i.test(bodyText.slice(0, 2500))) {
-        return { blocked: true, ready: true, resultsScanned: 0 };
+        return { blocked: true, ready: true, resultsScanned: 0, observedResults: 0, signature: '' };
       }
 
       function unwrap(href) {
@@ -1070,12 +1072,19 @@ export function buildGoogleResultScanScript(targetHost: string): string {
       var displayMentionsTarget = ${resultTextMentionsHost.toString()};
       var searchRoot = document.querySelector('#search') || document.querySelector('#rso') || document.querySelector('main') || document.body;
 
-      function visibleRect(node) {
+      function elementRect(node) {
         if (!node || !node.getBoundingClientRect) return null;
         var rect = node.getBoundingClientRect();
         if (rect.width <= 2 || rect.height <= 2) return null;
-        if (rect.bottom < 0 || rect.right < 0 || rect.top > window.innerHeight || rect.left > window.innerWidth) return null;
         return rect;
+      }
+
+      function isGoogleDestination(url) {
+        try {
+          return /(^|\\.)google\\.[a-z.]+$/i.test(new URL(url, location.href).hostname);
+        } catch (_) {
+          return true;
+        }
       }
 
       function resultContainerFor(node) {
@@ -1102,7 +1111,7 @@ export function buildGoogleResultScanScript(targetHost: string): string {
         var bestScore = -1;
         for (var j = 0; j < candidates.length; j += 1) {
           var a = candidates[j];
-          if (!visibleRect(a)) continue;
+          if (!elementRect(a)) continue;
           var destination = unwrap(a.getAttribute('href') || a.href || '');
           var text = (a.innerText || a.getAttribute('aria-label') || '').trim();
           var hasHeading = Boolean(a.querySelector && a.querySelector('h3'));
@@ -1127,7 +1136,35 @@ export function buildGoogleResultScanScript(targetHost: string): string {
       }
 
       var anchors = Array.prototype.slice.call(searchRoot ? searchRoot.querySelectorAll('a[href]') : []);
-      var resultsScanned = 0;
+
+      // Build a snapshot of actual organic-result anchors. This is used by
+      // the main process to decide when a page has genuinely stabilized.
+      // Do not use "any anchor exists" as readiness: Google's header/footer
+      // links render far earlier than the organic result set.
+      var organicSeen = {};
+      var organicSnapshot = [];
+      for (var s = 0; s < anchors.length; s += 1) {
+        var candidate = anchors[s];
+        var candidateHref = unwrap(candidate.getAttribute('href') || candidate.href || '');
+        if (!candidateHref || isGoogleDestination(candidateHref)) continue;
+
+        var candidateContainer = candidate.closest && candidate.closest('.MjjYud, .g, [data-snhf], [data-hveid]');
+        var candidateText = (((candidateContainer && candidateContainer.innerText) || candidate.innerText || '') + '').trim();
+        if (/\\bSponsored\\b/i.test(candidateText.slice(0, 240))) continue;
+
+        var hasHeading = Boolean(candidate.querySelector && candidate.querySelector('h3'));
+        var looksLikeResult = hasHeading || Boolean(candidateContainer) || candidateText.length >= 18;
+        if (!looksLikeResult) continue;
+
+        var snapshotKey = candidateHref.split('#')[0] + '|' + candidateText.slice(0, 120);
+        if (organicSeen[snapshotKey]) continue;
+        organicSeen[snapshotKey] = true;
+        organicSnapshot.push(snapshotKey);
+      }
+
+      var observedResults = organicSnapshot.length;
+      var signature = organicSnapshot.slice(0, 30).join('||');
+      var resultsScanned = observedResults;
       for (var i = 0; i < anchors.length; i += 1) {
         var seed = anchors[i];
         var destination = unwrap(seed.getAttribute('href') || seed.href || '');
@@ -1144,7 +1181,7 @@ export function buildGoogleResultScanScript(targetHost: string): string {
         var titleNode = anchor.querySelector && anchor.querySelector('h3');
         var titleText = ((titleNode && titleNode.innerText) || anchor.getAttribute('aria-label') || anchor.innerText || '').trim();
         anchor.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'auto' });
-        var rect = visibleRect(anchor);
+        var rect = elementRect(anchor);
         if (!rect) continue;
 
         resultsScanned += 1;
@@ -1152,6 +1189,8 @@ export function buildGoogleResultScanScript(targetHost: string): string {
           blocked: false,
           ready: true,
           resultsScanned: resultsScanned,
+          observedResults: observedResults,
+          signature: signature,
           match: {
             url: anchorDestination,
             title: titleText,
@@ -1176,18 +1215,20 @@ export function buildGoogleResultScanScript(targetHost: string): string {
         if (/\\bSponsored\\b/i.test(cardText.slice(0, 220))) continue;
         var fallbackAnchor = bestAnchor(card, node.closest && node.closest('a[href]'));
         if (!fallbackAnchor) continue;
-        var fallbackRect = visibleRect(fallbackAnchor);
+        var fallbackRect = elementRect(fallbackAnchor);
         if (!fallbackRect) continue;
         var fallbackDestination = unwrap(fallbackAnchor.getAttribute('href') || fallbackAnchor.href || '');
         var fallbackTitleNode = fallbackAnchor.querySelector && fallbackAnchor.querySelector('h3');
         var fallbackTitle = ((fallbackTitleNode && fallbackTitleNode.innerText) || fallbackAnchor.getAttribute('aria-label') || fallbackAnchor.innerText || '').trim();
         fallbackAnchor.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'auto' });
-        fallbackRect = visibleRect(fallbackAnchor) || fallbackRect;
+        fallbackRect = elementRect(fallbackAnchor) || fallbackRect;
         resultsScanned += 1;
         return {
           blocked: false,
           ready: true,
           resultsScanned: resultsScanned,
+          observedResults: observedResults,
+          signature: signature,
           match: {
             url: fallbackDestination,
             title: fallbackTitle,
@@ -1202,11 +1243,13 @@ export function buildGoogleResultScanScript(targetHost: string): string {
 
       return {
         blocked: false,
-        ready: anchors.length > 0 || document.readyState === 'complete',
-        resultsScanned: resultsScanned
+        ready: observedResults > 0 || document.readyState === 'complete',
+        resultsScanned: resultsScanned,
+        observedResults: observedResults,
+        signature: signature
       };
     } catch (_) {
-      return { blocked: false, ready: false, resultsScanned: 0 };
+      return { blocked: false, ready: false, resultsScanned: 0, observedResults: 0, signature: '' };
     }
   })()`;
 }
