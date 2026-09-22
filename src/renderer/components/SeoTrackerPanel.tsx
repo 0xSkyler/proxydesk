@@ -80,8 +80,8 @@ export function SeoTrackerPanel(): JSX.Element {
         <div>
           <h1>ProxyDesk SEO Tracker Lite</h1>
           <p>
-            ProxyScrape API → validation → live proxy assignment → Google page scan →
-            article click → Keep Alive → rotation.
+            ProxyScrape API → validation → live proxy assignment → continuous Google monitoring →
+            challenge pause/resume → rotation.
           </p>
         </div>
         <span className={running || starting ? 'tracker-pill tracker-pill--on' : 'tracker-pill'}>
@@ -188,9 +188,10 @@ export function SeoTrackerPanel(): JSX.Element {
       )}
 
       <div className="tracker-note">
-        Google pages are scanned sequentially up to the configured limit. Each page is
-        stopped as soon as its DOM is ready, so detection does not wait for complete page
-        loading. Keep Alive starts automatically only after the matched article opens.
+        Each proxy session continuously measures the saved keyword + website. Google
+        challenges pause the monitor instead of ending it; if normal results return in the
+        same session, measurement resumes automatically. A detected target is recorded but
+        not opened automatically. Keep Alive is a manual two-scroll inspection control.
         Browser sessions are isolated in memory and start fresh after every app restart.
       </div>
 
@@ -215,13 +216,15 @@ export function SeoTrackerPanel(): JSX.Element {
                 <tr key={result.browserId}>
                   <td>Browser {result.browserId}</td>
                   <td>{proxy ? `${proxy.host}:${proxy.port}` : '—'}</td>
-                  <td className={result.status === 'matched' ? 'status-ok' : result.status === 'error' || result.status === 'blocked' ? 'status-bad' : ''}>
+                  <td className={result.status === 'matched' ? 'status-ok' : result.status === 'error' ? 'status-bad' : ''}>
                     {result.status}
                     {result.error ? ` — ${result.error}` : ''}
                   </td>
                   <td>{result.resultPage ?? '—'}</td>
-                  <td title={result.landedUrl}>{result.matchedTitle ?? result.landedUrl ?? '—'}</td>
-                  <td>{result.keepAliveStarted ? 'Active' : '—'}</td>
+                  <td title={result.matchedUrl ?? result.landedUrl}>
+                    {result.matchedTitle ?? result.matchedUrl ?? result.landedUrl ?? '—'}
+                  </td>
+                  <td>Manual</td>
                 </tr>
               );
             })}
