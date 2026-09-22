@@ -164,6 +164,7 @@ export class SeoAutomationManager extends EventEmitter {
 
     for (const id of this.state.browserIds) {
       try {
+        this.browserManager.cancelMeasurementSession(id);
         this.browserManager.setBrowserKeepAlive(id, false, false);
       } catch {
         // Browser may already have been removed.
