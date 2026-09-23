@@ -1426,11 +1426,14 @@ interface GoogleLiveTargetState {
   blocked: boolean;
   observedResults: number;
   signature: string;
+  targetTextSeen?: boolean;
+  candidateText?: string;
   matchedAt?: number;
   match?: {
     url: string;
     title: string;
     organicIndex: number;
+    clickPoint?: { x: number; y: number };
   };
 }
 
@@ -1452,7 +1455,9 @@ export function buildInstallGoogleLiveTargetObserverScript(
       var state = {
         blocked: false,
         observedResults: 0,
-        signature: ''
+        signature: '',
+        targetTextSeen: false,
+        candidateText: ''
       };
       var matchedAnchor = null;
 
@@ -1484,8 +1489,13 @@ export function buildInstallGoogleLiveTargetObserverScript(
       function unwrap(href) {
         try {
           var resolved = new URL(href, location.href);
-          if (/(^|\\.)google\\.[a-z.]+$/i.test(resolved.hostname) && resolved.pathname === '/url') {
-            return resolved.searchParams.get('url') || resolved.searchParams.get('q') || href;
+          if (/(^|\\.)google\\.[a-z.]+$/i.test(resolved.hostname)) {
+            var redirected =
+              resolved.searchParams.get('url') ||
+              resolved.searchParams.get('q') ||
+              resolved.searchParams.get('adurl') ||
+              resolved.searchParams.get('imgurl');
+            if (redirected) return redirected;
           }
           return resolved.href;
         } catch (_) {
@@ -1505,6 +1515,194 @@ export function buildInstallGoogleLiveTargetObserverScript(
         var normalized = normalizeWords(text).replace(/\\s+/g, '');
         var targetWords = normalizeWords(target).replace(/\\s+/g, '');
         return normalized.indexOf(targetWords) !== -1;
+      }
+
+      function elementRect(element) {
+        if (!element || !element.getBoundingClientRect) return null;
+        try {
+          var rect = element.getBoundingClientRect();
+          if (!rect || rect.width <= 2 || rect.height <= 2) return null;
+          return rect;
+        } catch (_) {
+          return null;
+        }
+      }
+
+      function absoluteHref(anchor) {
+        try {
+          var raw =
+            anchor.getAttribute('href') ||
+            anchor.getAttribute('data-href') ||
+            anchor.getAttribute('data-url') ||
+            anchor.href ||
+            '';
+          return new URL(raw, location.href).href;
+        } catch (_) {
+          return '';
+        }
+      }
+
+      function directDestination(anchor) {
+        var raw =
+          anchor.getAttribute('href') ||
+          anchor.getAttribute('data-href') ||
+          anchor.getAttribute('data-url') ||
+          anchor.href ||
+          '';
+        var unwrapped = unwrap(raw);
+        return {
+          raw: absoluteHref(anchor),
+          unwrapped: unwrapped,
+          host: destinationHost(unwrapped)
+        };
+      }
+
+      function chooseAnchor(block) {
+        if (!block || !block.querySelectorAll) return null;
+        var anchors = Array.prototype.slice.call(
+          block.querySelectorAll('a[href],a[data-href],a[data-url]')
+        );
+        var best = null;
+
+        anchors.forEach(function(anchor) {
+          try {
+            var heading = anchor.querySelector && anchor.querySelector('h3,h2,h1');
+            var title = (
+              (heading && heading.innerText) ||
+              anchor.getAttribute('aria-label') ||
+              anchor.innerText ||
+              ''
+            ).trim();
+            var info = directDestination(anchor);
+            var rect = elementRect(anchor);
+
+            var score = 0;
+            if (heading) score += 500;
+            if (keywordMatches(title)) score += 450;
+            if (info.host === target) score += 350;
+            if (mentionsTarget(title)) score += 120;
+            if (title.length >= 8) score += 80;
+            if (rect) score += 40;
+            if (!info.raw) score -= 250;
+
+            if (!best || score > best.score) {
+              best = {
+                anchor: anchor,
+                title: title,
+                score: score,
+                rawUrl: info.raw,
+                directUrl: info.unwrapped,
+                directHost: info.host,
+                rect: rect
+              };
+            }
+          } catch (_) {
+            // Ignore malformed anchors inside an otherwise valid visual card.
+          }
+        });
+
+        return best;
+      }
+
+      function textBlockCandidate(root) {
+        if (!root || !root.querySelectorAll) return null;
+
+        // Recognition starts from rendered host/domain text, independent of
+        // the anchor's current URL shape.
+        var nodes = Array.prototype.slice.call(
+          root.querySelectorAll('cite,span,div,h3,h2,a')
+        );
+        var bestBlock = null;
+
+        for (var i = 0; i < nodes.length; i += 1) {
+          var seed = nodes[i];
+          var seedText = ((seed && seed.innerText) || '').trim();
+          if (!mentionsTarget(seedText)) continue;
+
+          var card = seed;
+          for (var depth = 0; card && depth < 11; depth += 1, card = card.parentElement) {
+            var cardText = ((card && card.innerText) || '').trim();
+            if (
+              cardText.length < 8 ||
+              cardText.length > 5000 ||
+              !mentionsTarget(cardText) ||
+              !keywordMatches(cardText)
+            ) {
+              continue;
+            }
+            if (/\\bSponsored\\b/i.test(cardText.slice(0, 320))) break;
+
+            state.targetTextSeen = true;
+            if (!state.candidateText || cardText.length < state.candidateText.length) {
+              state.candidateText = cardText.slice(0, 500);
+            }
+
+            var chosen = chooseAnchor(card);
+            if (!chosen) continue;
+
+            var blockScore =
+              chosen.score +
+              Math.max(0, 500 - Math.min(cardText.length, 500)) -
+              depth * 5;
+
+            if (!bestBlock || blockScore > bestBlock.score) {
+              bestBlock = {
+                score: blockScore,
+                cardText: cardText,
+                chosen: chosen
+              };
+            }
+
+            if (
+              chosen.score >= 900 ||
+              (chosen.title && keywordMatches(chosen.title))
+            ) {
+              break;
+            }
+          }
+        }
+
+        // Heading-first fallback for variants where the displayed host is a
+        // sibling of the blue title rather than inside its anchor.
+        if (!bestBlock) {
+          var headings = Array.prototype.slice.call(root.querySelectorAll('h3,h2'));
+          for (var hIndex = 0; hIndex < headings.length; hIndex += 1) {
+            var headingNode = headings[hIndex];
+            var headingText = (headingNode.innerText || '').trim();
+            if (!keywordMatches(headingText)) continue;
+
+            var headingCard = headingNode;
+            for (
+              var headingDepth = 0;
+              headingCard && headingDepth < 11;
+              headingDepth += 1, headingCard = headingCard.parentElement
+            ) {
+              var headingBlockText = ((headingCard && headingCard.innerText) || '').trim();
+              if (
+                headingBlockText.length > 5000 ||
+                !mentionsTarget(headingBlockText) ||
+                !keywordMatches(headingBlockText)
+              ) {
+                continue;
+              }
+
+              state.targetTextSeen = true;
+              state.candidateText = headingBlockText.slice(0, 500);
+              var headingChoice = chooseAnchor(headingCard);
+              if (headingChoice) {
+                bestBlock = {
+                  score: headingChoice.score + 400,
+                  cardText: headingBlockText,
+                  chosen: headingChoice
+                };
+              }
+              break;
+            }
+            if (bestBlock) break;
+          }
+        }
+
+        return bestBlock;
       }
 
       function scan() {
@@ -1567,6 +1765,12 @@ export function buildInstallGoogleLiveTargetObserverScript(
               var exactHost = host === target;
               var textHost = mentionsTarget(bestBlockText);
               var keyMatch = keywordMatches(title) || keywordMatches(bestBlockText);
+              if (textHost && keywordMatches(bestBlockText)) {
+                state.targetTextSeen = true;
+                if (!state.candidateText || bestBlockText.length < state.candidateText.length) {
+                  state.candidateText = bestBlockText.slice(0, 500);
+                }
+              }
               if ((exactHost || textHost) && keyMatch) {
                 var score = 0;
                 if (exactHost) score += 300;
@@ -1577,7 +1781,8 @@ export function buildInstallGoogleLiveTargetObserverScript(
                   anchor: anchor,
                   url: destination,
                   title: title,
-                  score: score
+                  score: score,
+                  rect: elementRect(anchor)
                 });
               }
             } catch (_) {
@@ -1589,40 +1794,23 @@ export function buildInstallGoogleLiveTargetObserverScript(
           state.signature = organic.slice(0, 40).join('||');
 
           if (!candidates.length) {
-            // Extra text-first pass for layouts where the domain line and
-            // title are siblings rather than part of the same anchor.
-            var textNodes = Array.prototype.slice.call(root.querySelectorAll('cite, span, div'));
-            for (var i = 0; i < textNodes.length; i += 1) {
-              var node = textNodes[i];
-              var directText = (node.innerText || '').trim();
-              if (!mentionsTarget(directText)) continue;
+            var blockMatch = textBlockCandidate(root);
+            if (blockMatch && blockMatch.chosen) {
+              var chosen = blockMatch.chosen;
+              var preferredUrl =
+                chosen.directHost === target && chosen.directUrl
+                  ? chosen.directUrl
+                  : (chosen.rawUrl || chosen.directUrl);
 
-              var card = node;
-              for (var depth = 0; card && depth < 9; depth += 1, card = card.parentElement) {
-                var cardText = ((card && card.innerText) || '').trim();
-                if (!keywordMatches(cardText) || !mentionsTarget(cardText)) continue;
-                if (/\\bSponsored\\b/i.test(cardText.slice(0, 280))) break;
-
-                var cardAnchors = card.querySelectorAll
-                  ? Array.prototype.slice.call(card.querySelectorAll('a[href]'))
-                  : [];
-                for (var j = 0; j < cardAnchors.length; j += 1) {
-                  var a = cardAnchors[j];
-                  var url = unwrap(a.getAttribute('href') || a.href || '');
-                  var host = destinationHost(url);
-                  if (host !== target) continue;
-                  var h3 = a.querySelector && a.querySelector('h3');
-                  var text = ((h3 && h3.innerText) || a.innerText || '').trim();
-                  candidates.push({
-                    anchor: a,
-                    url: url,
-                    title: text,
-                    score: (keywordMatches(text) ? 500 : 250) + (h3 ? 100 : 0)
-                  });
-                }
-                if (candidates.length) break;
+              if (preferredUrl) {
+                candidates.push({
+                  anchor: chosen.anchor,
+                  url: preferredUrl,
+                  title: chosen.title || queryText,
+                  score: blockMatch.score,
+                  rect: chosen.rect
+                });
               }
-              if (candidates.length) break;
             }
           }
 
@@ -1640,10 +1828,17 @@ export function buildInstallGoogleLiveTargetObserverScript(
             }
           }
 
+          var winnerRect = winner.rect || elementRect(winner.anchor);
           state.match = {
             url: winnerUrl,
             title: winner.title,
-            organicIndex: organicIndex
+            organicIndex: organicIndex,
+            clickPoint: winnerRect
+              ? {
+                  x: winnerRect.left + Math.max(8, Math.min(winnerRect.width / 2, winnerRect.width - 8)),
+                  y: winnerRect.top + winnerRect.height / 2
+                }
+              : undefined
           };
           state.matchedAt = Date.now();
 
@@ -1679,6 +1874,19 @@ export function buildInstallGoogleLiveTargetObserverScript(
             matchedAnchor.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'auto' });
             matchedAnchor.target = '_self';
             matchedAnchor.focus({ preventScroll: true });
+            try {
+              var rect = matchedAnchor.getBoundingClientRect && matchedAnchor.getBoundingClientRect();
+              var eventInit = {
+                bubbles: true,
+                cancelable: true,
+                view: window,
+                clientX: rect ? rect.left + rect.width / 2 : 0,
+                clientY: rect ? rect.top + rect.height / 2 : 0,
+                button: 0
+              };
+              matchedAnchor.dispatchEvent(new MouseEvent('mousedown', eventInit));
+              matchedAnchor.dispatchEvent(new MouseEvent('mouseup', eventInit));
+            } catch (_) {}
             matchedAnchor.click();
             return true;
           } catch (_) {
