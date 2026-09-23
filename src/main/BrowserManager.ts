@@ -279,14 +279,15 @@ export class BrowserManager extends EventEmitter {
         connectionStatus: 'connected'
       });
     });
-    wc.on('did-stop-loading', () =>
+    wc.on('did-stop-loading', () => {
+      if (extractGoogleBlockContinueUrl(wc.getURL())) return;
       this.updateState(managed, {
         loading: false,
         canGoBack: wc.canGoBack(),
         canGoForward: wc.canGoForward(),
         connectionStatus: 'connected'
-      })
-    );
+      });
+    });
     wc.on('did-navigate', (_e, url) => {
       this.updateState(managed, { url });
       this.maybeHandleGoogleBlock(managed, url, options);
@@ -485,7 +486,24 @@ export class BrowserManager extends EventEmitter {
    */
   async assignProxy(id: number, proxy: ProxyRecord | null): Promise<void> {
     const managed = this.get(id);
-    this.updateState(managed, { proxy, connectionStatus: proxy ? 'proxy-checking' : 'no-proxy' });
+
+    // Proxy changes define a new browsing generation. Cancel any old Keep
+    // Alive worker here as a final safety net even if the orchestration layer
+    // already stopped it, so a stale action can never leak into the new proxy
+    // session.
+    managed.keepAliveGeneration += 1;
+    managed.keepAliveEnabled = false;
+    managed.keepAliveBusy = false;
+    managed.keepAliveBusySince = 0;
+    managed.keepAliveNextAt = Number.POSITIVE_INFINITY;
+    managed.controlledKeepAliveHost = null;
+    managed.controlledKeepAliveContinuous = false;
+    this.updateState(managed, {
+      proxy,
+      connectionStatus: proxy ? 'proxy-checking' : 'no-proxy',
+      keepAliveEnabled: false,
+      keepAliveActivity: 'idle'
+    });
 
     if (!proxy) {
       await managed.session.setProxy({ mode: 'direct' });

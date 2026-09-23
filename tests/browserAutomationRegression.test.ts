@@ -13,7 +13,6 @@ import {
   BrowserManager,
   buildClickGoogleLiveTargetObserverScript,
   buildEphemeralPartitionName,
-  buildGoogleResultScanScript,
   buildInstallGoogleLiveTargetObserverScript,
   buildKeepAliveActionScript
 } from '../src/main/BrowserManager';
