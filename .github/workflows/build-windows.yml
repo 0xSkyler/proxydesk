@@ -1,11 +1,11 @@
-# v0.5.2 live-observer verification
+# v0.5.3 strong-DOM verification
 name: Build Windows Installer
 
 on:
   push:
     branches:
       - main
-      - feature/google-observer-click-0.5.2
+      - feature/strong-dom-text-match-0.5.3
     tags:
       - 'v*'
   pull_request:
@@ -67,7 +67,7 @@ jobs:
       - name: Upload installer artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ProxyDesk-v0.5.2-windows
+          name: ProxyDesk-v0.5.3-windows
           path: release/MultiBrowserProxySetup.exe
           if-no-files-found: error
 
