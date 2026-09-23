@@ -337,6 +337,114 @@ describe('controlled test interaction', () => {
   });
 });
 
+describe('strong Google DOM text matching', () => {
+  it('recognizes the visible host + keyword card even when the title link is Google-wrapped', () => {
+    const clicked = vi.fn();
+    const titleText = 'RMG Cutting Process: A Stage-by-Stage Control Guide';
+    const cardText =
+      'appareldiary.com\n' +
+      titleText +
+      '\nThe RMG cutting process operates on 60–70%. Cutting is also a batch process.';
+
+    const h3 = { innerText: titleText, parentElement: null as unknown };
+    const anchorNode = {
+      href: 'https://www.google.com/search?ved=wrapped-result',
+      innerText: titleText,
+      parentElement: null as unknown,
+      target: '',
+      getAttribute: (name: string) => {
+        if (name === 'href') return 'https://www.google.com/search?ved=wrapped-result';
+        if (name === 'aria-label') return null;
+        if (name === 'data-href' || name === 'data-url') return null;
+        return null;
+      },
+      querySelector: (selector: string) =>
+        selector === 'h3,h2,h1' ? h3 : null,
+      getBoundingClientRect: () => ({
+        left: 50,
+        top: 190,
+        width: 690,
+        height: 42,
+        right: 740,
+        bottom: 232
+      }),
+      scrollIntoView: vi.fn(),
+      focus: vi.fn(),
+      dispatchEvent: vi.fn(),
+      click: clicked
+    };
+
+    const card = {
+      innerText: cardText,
+      parentElement: null as unknown,
+      querySelectorAll: (selector: string) =>
+        selector === 'a[href],a[data-href],a[data-url]' ? [anchorNode] : []
+    };
+    anchorNode.parentElement = card;
+    h3.parentElement = anchorNode;
+
+    const domainNode = {
+      innerText: 'appareldiary.com',
+      parentElement: card
+    };
+
+    const root = {
+      innerText: cardText,
+      querySelectorAll: (selector: string) => {
+        if (selector === 'a[href]') return [anchorNode];
+        if (selector === 'cite,span,div,h3,h2,a') return [domainNode, h3];
+        if (selector === 'h3,h2') return [h3];
+        return [];
+      }
+    };
+
+    const document = {
+      body: { innerText: cardText },
+      documentElement: {},
+      querySelector: (selector: string) => (selector === '#search' ? root : null)
+    };
+    const location = { href: 'https://www.google.com/search?q=rmg+cutting' };
+    const windowObject: Record<string, unknown> = { location };
+
+    class MutationObserverMock {
+      constructor(_callback: () => void) {}
+      observe(): void {}
+      disconnect(): void {}
+    }
+
+    const context = vm.createContext({
+      window: windowObject,
+      document,
+      location,
+      URL,
+      MutationObserver: MutationObserverMock,
+      setInterval: () => 1,
+      clearInterval: () => undefined,
+      Date
+    });
+
+    const state = vm.runInContext(
+      buildInstallGoogleLiveTargetObserverScript('appareldiary.com', 'rmg cutting'),
+      context
+    ) as {
+      targetTextSeen?: boolean;
+      match?: { url: string; title: string; clickPoint?: { x: number; y: number } };
+    };
+
+    expect(state.targetTextSeen).toBe(true);
+    expect(state.match?.title).toContain('RMG Cutting Process');
+    expect(state.match?.clickPoint).toBeDefined();
+
+    const clickedResult = vm.runInContext(
+      buildClickGoogleLiveTargetObserverScript(),
+      context
+    ) as boolean;
+
+    expect(clickedResult).toBe(true);
+    expect(clicked).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('Google live-result observation', () => {
   it('detects keyword + website in the live page watcher and clicks the stored result anchor', () => {
     const targetUrl = 'https://appareldiary.com/article/rmg-cutting';
