@@ -1,8 +1,8 @@
 {
   "name": "proxydesk",
   "productName": "ProxyDesk",
-  "version": "0.5.3",
-  "description": "SEO test runner with strong DOM text recognition, live Google result observation, exact-host opening, ProxyScrape rotation, and Keep Alive.",
+  "version": "0.5.4",
+  "description": "SEO test runner with DOM-ready navigation, strong Google result recognition, self-healing Keep Alive, and ProxyScrape rotation.",
   "author": "ProxyDesk",
   "license": "MIT",
   "repository": {

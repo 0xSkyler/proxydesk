@@ -1,11 +1,11 @@
-# v0.5.3 strong-DOM verification
+# v0.5.4 DOM-ready + Keep Alive watchdog verification
 name: Build Windows Installer
 
 on:
   push:
     branches:
       - main
-      - feature/strong-dom-text-match-0.5.3
+      - feature/loading-keepalive-watchdog-0.5.4
     tags:
       - 'v*'
   pull_request:
@@ -67,7 +67,7 @@ jobs:
       - name: Upload installer artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ProxyDesk-v0.5.3-windows
+          name: ProxyDesk-v0.5.4-windows
           path: release/MultiBrowserProxySetup.exe
           if-no-files-found: error
 

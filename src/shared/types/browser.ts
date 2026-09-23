@@ -10,6 +10,14 @@ export type BrowserConnectionStatus =
   | 'no-proxy'
   | 'crashed';
 
+export type KeepAliveActivity =
+  | 'idle'
+  | 'starting'
+  | 'scrolling'
+  | 'opening-link'
+  | 'waiting'
+  | 'recovering';
+
 export interface BrowserState {
   id: number;
   label: string;
@@ -25,7 +33,10 @@ export interface BrowserState {
   crashCount: number;
   keepAliveEnabled: boolean;
   keepAliveHops: number;
+  keepAliveActivity: KeepAliveActivity;
+  keepAliveFailureCount: number;
   lastKeepAliveAt?: string;
+  lastKeepAliveHeartbeatAt?: string;
   title?: string;
   faviconUrl?: string;
 }

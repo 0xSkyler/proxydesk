@@ -85,6 +85,10 @@ interface ManagedBrowser {
   keepAliveHops: number;
   keepAliveNextAt: number;
   keepAliveBusy: boolean;
+  keepAliveBusySince: number;
+  keepAliveGeneration: number;
+  keepAliveLastHeartbeatAt: number;
+  keepAliveFailureCount: number;
   keepAliveVisited: Set<string>;
   controlledKeepAliveHost: string | null;
   controlledKeepAliveContinuous: boolean;
@@ -134,6 +138,8 @@ export class BrowserManager extends EventEmitter {
   private keepAliveIntervalMs = 60_000;
   private keepAliveMaxHops = 25;
   private keepAliveFollowLinks = true;
+  private readonly keepAliveWatchdogMs = 18_000;
+  private readonly keepAliveActionTimeoutMs = 14_000;
   private measurementTokens = new Map<number, number>();
 
   attachWindow(window: BrowserWindow): void {
@@ -218,7 +224,9 @@ export class BrowserManager extends EventEmitter {
       connectionStatus: 'idle',
       crashCount: 0,
       keepAliveEnabled: false,
-      keepAliveHops: 0
+      keepAliveHops: 0,
+      keepAliveActivity: 'idle',
+      keepAliveFailureCount: 0
     };
 
     const managed: ManagedBrowser = {
@@ -232,6 +240,10 @@ export class BrowserManager extends EventEmitter {
       keepAliveHops: 0,
       keepAliveNextAt: Date.now() + this.keepAliveIntervalMs,
       keepAliveBusy: false,
+      keepAliveBusySince: 0,
+      keepAliveGeneration: 0,
+      keepAliveLastHeartbeatAt: 0,
+      keepAliveFailureCount: 0,
       keepAliveVisited: new Set<string>(),
       controlledKeepAliveHost: null,
       controlledKeepAliveContinuous: false
@@ -251,7 +263,22 @@ export class BrowserManager extends EventEmitter {
     const { view, id } = managed;
     const wc = view.webContents;
 
-    wc.on('did-start-loading', () => this.updateState(managed, { loading: true, connectionStatus: 'loading' }));
+    // Treat "loading" as main-document readiness, not as "every network
+    // request on the page has finished". Modern sites can keep requests open
+    // indefinitely; DOM automation must not be blocked by those background
+    // requests. As soon as the document DOM exists, the browser is usable.
+    wc.on('did-start-loading', () =>
+      this.updateState(managed, { loading: true, connectionStatus: 'loading' })
+    );
+    wc.on('dom-ready', () => {
+      if (extractGoogleBlockContinueUrl(wc.getURL())) return;
+      this.updateState(managed, {
+        loading: false,
+        canGoBack: wc.canGoBack(),
+        canGoForward: wc.canGoForward(),
+        connectionStatus: 'connected'
+      });
+    });
     wc.on('did-stop-loading', () =>
       this.updateState(managed, {
         loading: false,
@@ -1142,16 +1169,24 @@ export class BrowserManager extends EventEmitter {
     }
 
     this.ensureKeepAliveTimer();
+    managed.keepAliveGeneration += 1;
     managed.controlledKeepAliveHost = normalizedHost;
     managed.controlledKeepAliveContinuous = true;
     managed.keepAliveEnabled = true;
     managed.keepAliveHops = 0;
+    managed.keepAliveBusy = false;
+    managed.keepAliveBusySince = 0;
+    managed.keepAliveFailureCount = 0;
     managed.keepAliveVisited.clear();
     managed.keepAliveVisited.add(managed.view.webContents.getURL());
     managed.keepAliveNextAt = Date.now();
+    managed.keepAliveLastHeartbeatAt = Date.now();
     this.updateState(managed, {
       keepAliveEnabled: true,
-      keepAliveHops: 0
+      keepAliveHops: 0,
+      keepAliveActivity: 'starting',
+      keepAliveFailureCount: 0,
+      lastKeepAliveHeartbeatAt: new Date(managed.keepAliveLastHeartbeatAt).toISOString()
     });
     queueMicrotask(() => this.tickKeepAlive());
   }
@@ -1184,7 +1219,12 @@ export class BrowserManager extends EventEmitter {
   setBrowserKeepAlive(id: number, enabled: boolean, resetHops = false): void {
     this.ensureKeepAliveTimer();
     const managed = this.get(id);
+    managed.keepAliveGeneration += 1;
     managed.keepAliveEnabled = enabled;
+    managed.keepAliveBusy = false;
+    managed.keepAliveBusySince = 0;
+    managed.keepAliveFailureCount = 0;
+    managed.keepAliveLastHeartbeatAt = Date.now();
     if (!enabled) {
       managed.controlledKeepAliveHost = null;
       managed.controlledKeepAliveContinuous = false;
@@ -1198,7 +1238,10 @@ export class BrowserManager extends EventEmitter {
     managed.keepAliveNextAt = enabled ? Date.now() : Number.POSITIVE_INFINITY;
     this.updateState(managed, {
       keepAliveEnabled: enabled,
-      keepAliveHops: managed.keepAliveHops
+      keepAliveHops: managed.keepAliveHops,
+      keepAliveActivity: enabled ? 'starting' : 'idle',
+      keepAliveFailureCount: 0,
+      lastKeepAliveHeartbeatAt: new Date(managed.keepAliveLastHeartbeatAt).toISOString()
     });
     if (enabled) queueMicrotask(() => this.tickKeepAlive());
   }
@@ -1206,7 +1249,16 @@ export class BrowserManager extends EventEmitter {
   setKeepAliveAll(enabled: boolean, resetHops = false): void {
     this.ensureKeepAliveTimer();
     for (const managed of this.browsers.values()) {
+      managed.keepAliveGeneration += 1;
       managed.keepAliveEnabled = enabled;
+      managed.keepAliveBusy = false;
+      managed.keepAliveBusySince = 0;
+      managed.keepAliveFailureCount = 0;
+      managed.keepAliveLastHeartbeatAt = Date.now();
+      if (!enabled) {
+        managed.controlledKeepAliveHost = null;
+        managed.controlledKeepAliveContinuous = false;
+      }
       if (resetHops) {
         managed.keepAliveHops = 0;
         managed.keepAliveVisited.clear();
@@ -1216,7 +1268,10 @@ export class BrowserManager extends EventEmitter {
       managed.keepAliveNextAt = enabled ? Date.now() : Number.POSITIVE_INFINITY;
       this.updateState(managed, {
         keepAliveEnabled: enabled,
-        keepAliveHops: managed.keepAliveHops
+        keepAliveHops: managed.keepAliveHops,
+        keepAliveActivity: enabled ? 'starting' : 'idle',
+        keepAliveFailureCount: 0,
+        lastKeepAliveHeartbeatAt: new Date(managed.keepAliveLastHeartbeatAt).toISOString()
       });
     }
     if (enabled) queueMicrotask(() => this.tickKeepAlive());
@@ -1225,68 +1280,150 @@ export class BrowserManager extends EventEmitter {
   private tickKeepAlive(): void {
     const now = Date.now();
     for (const managed of this.browsers.values()) {
-      if (!managed.keepAliveEnabled || managed.keepAliveBusy || now < managed.keepAliveNextAt) continue;
+      if (!managed.keepAliveEnabled) continue;
 
       const wc = managed.view.webContents;
-      // Query Chromium directly instead of trusting a renderer-facing
-      // loading flag that can remain stale after an aborted navigation.
-      if (wc.isDestroyed() || wc.isLoading()) {
-        managed.keepAliveNextAt = now + 750;
+      if (wc.isDestroyed()) {
+        managed.keepAliveGeneration += 1;
+        managed.keepAliveEnabled = false;
+        managed.keepAliveBusy = false;
+        managed.keepAliveBusySince = 0;
+        this.updateState(managed, {
+          keepAliveEnabled: false,
+          keepAliveActivity: 'idle'
+        });
         continue;
       }
 
+      // A stale "busy" flag used to leave the UI green forever while no
+      // Keep Alive work was actually happening. Recover it deterministically.
+      if (managed.keepAliveBusy) {
+        if (
+          managed.keepAliveBusySince > 0 &&
+          now - managed.keepAliveBusySince > this.keepAliveWatchdogMs
+        ) {
+          managed.keepAliveGeneration += 1;
+          managed.keepAliveBusy = false;
+          managed.keepAliveBusySince = 0;
+          managed.keepAliveFailureCount += 1;
+          managed.keepAliveNextAt = now + 750;
+          managed.keepAliveLastHeartbeatAt = now;
+          this.updateState(managed, {
+            keepAliveActivity: 'recovering',
+            keepAliveFailureCount: managed.keepAliveFailureCount,
+            lastKeepAliveHeartbeatAt: new Date(now).toISOString()
+          });
+          logger.warn(
+            'browser',
+            `Browser ${managed.id}: Keep Alive watchdog recovered a stale worker.`
+          );
+        }
+        continue;
+      }
+
+      if (now < managed.keepAliveNextAt) continue;
+
+      // Do NOT gate on webContents.isLoading(). A document can be fully
+      // interactive while analytics/images/streaming requests keep Chromium's
+      // network loading flag true. The action itself probes the live DOM and
+      // is bounded by a timeout.
+      const generation = managed.keepAliveGeneration;
       managed.keepAliveBusy = true;
-      void this.runKeepAliveAction(managed).finally(() => {
+      managed.keepAliveBusySince = now;
+      managed.keepAliveLastHeartbeatAt = now;
+      this.updateState(managed, {
+        keepAliveActivity: 'scrolling',
+        lastKeepAliveHeartbeatAt: new Date(now).toISOString()
+      });
+
+      void this.runKeepAliveAction(managed, generation).finally(() => {
+        if (generation !== managed.keepAliveGeneration) return;
         managed.keepAliveBusy = false;
-        // Preserve a short retry explicitly scheduled by the action's error
-        // handler; otherwise use the normal jittered content-page interval.
+        managed.keepAliveBusySince = 0;
+        if (!managed.keepAliveEnabled) return;
+
         if (managed.keepAliveNextAt <= Date.now()) {
           const jitter = 0.8 + Math.random() * 0.4;
           managed.keepAliveNextAt = Date.now() + Math.round(this.keepAliveIntervalMs * jitter);
         }
+        managed.keepAliveLastHeartbeatAt = Date.now();
+        this.updateState(managed, {
+          keepAliveActivity: 'waiting',
+          lastKeepAliveHeartbeatAt: new Date(managed.keepAliveLastHeartbeatAt).toISOString()
+        });
       });
     }
   }
 
-  private async runKeepAliveAction(managed: ManagedBrowser): Promise<void> {
+  private async runKeepAliveAction(managed: ManagedBrowser, generation: number): Promise<void> {
     const wc = managed.view.webContents;
     const pagesVisited = managed.keepAliveHops + 1;
     const controlled = managed.controlledKeepAliveContinuous && Boolean(managed.controlledKeepAliveHost);
     const canHop = controlled || (this.keepAliveFollowLinks && pagesVisited < this.keepAliveMaxHops);
 
     try {
-      const result = (await wc.executeJavaScript(
+      if (controlled && managed.controlledKeepAliveHost) {
+        let currentHost = '';
+        try {
+          currentHost = new URL(wc.getURL()).hostname
+            .toLowerCase()
+            .replace(/^www\./, '')
+            .replace(/\.$/, '');
+        } catch {
+          currentHost = '';
+        }
+        if (currentHost !== managed.controlledKeepAliveHost) {
+          throw new Error(
+            `Keep Alive left controlled host ${managed.controlledKeepAliveHost}; current host is ${currentHost || 'unknown'}.`
+          );
+        }
+      }
+
+      const actionPromise = wc.executeJavaScript(
         buildKeepAliveActionScript(
           canHop,
           Array.from(managed.keepAliveVisited),
           managed.controlledKeepAliveHost ?? undefined
         ),
         true
-      )) as {
-        clickedUrl?: string;
-      };
+      ) as Promise<{ clickedUrl?: string }>;
+
+      const result = await Promise.race([
+        actionPromise,
+        delay(this.keepAliveActionTimeoutMs).then(() => {
+          throw new Error(`Keep Alive DOM action exceeded ${this.keepAliveActionTimeoutMs} ms.`);
+        })
+      ]);
+
+      if (generation !== managed.keepAliveGeneration || !managed.keepAliveEnabled) return;
 
       const completedAt = new Date().toISOString();
+      managed.keepAliveLastHeartbeatAt = Date.now();
+      managed.keepAliveFailureCount = 0;
 
-      // Controlled test mode repeats until the next proxy rotation cancels it.
       if (!controlled && pagesVisited >= this.keepAliveMaxHops) {
         managed.keepAliveEnabled = false;
         this.updateState(managed, {
           lastKeepAliveAt: completedAt,
           keepAliveEnabled: false,
-          keepAliveHops: managed.keepAliveHops
+          keepAliveHops: managed.keepAliveHops,
+          keepAliveActivity: 'idle',
+          keepAliveFailureCount: 0,
+          lastKeepAliveHeartbeatAt: new Date(managed.keepAliveLastHeartbeatAt).toISOString()
         });
         return;
       }
 
       if (!canHop || !result.clickedUrl) {
         if (controlled) {
-          // Stay alive on the current controlled page and try again shortly.
           managed.keepAliveNextAt = Date.now() + 2_000;
           this.updateState(managed, {
             lastKeepAliveAt: completedAt,
             keepAliveEnabled: true,
-            keepAliveHops: managed.keepAliveHops
+            keepAliveHops: managed.keepAliveHops,
+            keepAliveActivity: 'waiting',
+            keepAliveFailureCount: 0,
+            lastKeepAliveHeartbeatAt: new Date(managed.keepAliveLastHeartbeatAt).toISOString()
           });
           return;
         }
@@ -1295,7 +1432,10 @@ export class BrowserManager extends EventEmitter {
         this.updateState(managed, {
           lastKeepAliveAt: completedAt,
           keepAliveEnabled: false,
-          keepAliveHops: managed.keepAliveHops
+          keepAliveHops: managed.keepAliveHops,
+          keepAliveActivity: 'idle',
+          keepAliveFailureCount: 0,
+          lastKeepAliveHeartbeatAt: new Date(managed.keepAliveLastHeartbeatAt).toISOString()
         });
         return;
       }
@@ -1306,16 +1446,26 @@ export class BrowserManager extends EventEmitter {
       this.updateState(managed, {
         keepAliveEnabled: true,
         keepAliveHops: managed.keepAliveHops,
-        lastKeepAliveAt: completedAt
+        lastKeepAliveAt: completedAt,
+        keepAliveActivity: 'opening-link',
+        keepAliveFailureCount: 0,
+        lastKeepAliveHeartbeatAt: new Date(managed.keepAliveLastHeartbeatAt).toISOString()
       });
     } catch (err) {
-      // A navigation can make script execution temporarily unavailable.
-      // Retry, but record the reason instead of silently doing nothing.
+      if (generation !== managed.keepAliveGeneration || !managed.keepAliveEnabled) return;
+
+      managed.keepAliveFailureCount += 1;
+      managed.keepAliveLastHeartbeatAt = Date.now();
+      managed.keepAliveNextAt = Date.now() + 1_250;
+      this.updateState(managed, {
+        keepAliveActivity: 'recovering',
+        keepAliveFailureCount: managed.keepAliveFailureCount,
+        lastKeepAliveHeartbeatAt: new Date(managed.keepAliveLastHeartbeatAt).toISOString()
+      });
       logger.warn(
         'browser',
-        `Browser ${managed.id}: Keep Alive action failed: ${(err as Error).message}`
+        `Browser ${managed.id}: Keep Alive action failed; retrying: ${(err as Error).message}`
       );
-      managed.keepAliveNextAt = Date.now() + 1500;
     }
   }
 }
@@ -1371,12 +1521,12 @@ export function buildKeepAliveActionScript(
       await wait(250);
 
       for (let cycle = 0; cycle < cycles; cycle += 1) {
-        const downDuration = 3400 + Math.floor(Math.random() * 1600);
-        const upDuration = 3400 + Math.floor(Math.random() * 1600);
+        const downDuration = 1200 + Math.floor(Math.random() * 700);
+        const upDuration = 1200 + Math.floor(Math.random() * 700);
         await animateScrollTo(maxScroll(), downDuration);
-        await wait(550 + Math.floor(Math.random() * 650));
+        await wait(250 + Math.floor(Math.random() * 250));
         await animateScrollTo(0, upDuration);
-        await wait(550 + Math.floor(Math.random() * 650));
+        await wait(250 + Math.floor(Math.random() * 250));
       }
     } else {
       for (let cycle = 0; cycle < cycles; cycle += 1) {

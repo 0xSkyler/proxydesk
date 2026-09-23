@@ -217,3 +217,12 @@ As soon as a browser receives a live proxy it runs the saved Google keyword sear
 If a Google challenge/consent page is observed during autonomous SEO, that browser's current attempt is reported as blocked. Autonomous mode does not immediately change proxies in response to that challenge; it waits for the next ordinary scheduled rotation cycle.
 
 The selected file path, keyword, target, runtime proxy pool, credentials, assignments and automation state are kept in memory only. Closing ProxyDesk clears them.
+
+
+## v0.5.4 — DOM-ready loading and self-healing Keep Alive
+
+- Browser status becomes Ready at DOM readiness; long-running background network requests no longer gate DOM automation.
+- Keep Alive no longer waits for Chromium's global network-loading flag before scrolling.
+- A bounded Keep Alive action timeout and an 18-second worker watchdog recover stale/busy loops automatically.
+- Per-browser activity now reports starting, scrolling, opening article, waiting, or recovering instead of a boolean-only "active" flag.
+- Controlled Keep Alive continues on the exact configured host until the next proxy rotation or manual stop.

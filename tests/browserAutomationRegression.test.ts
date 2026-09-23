@@ -38,7 +38,9 @@ function installManagedBrowser(
       connectionStatus: 'idle',
       crashCount: 0,
       keepAliveEnabled: false,
-      keepAliveHops: 0
+      keepAliveHops: 0,
+      keepAliveActivity: 'idle',
+      keepAliveFailureCount: 0
     },
     restartAttempts: 0,
     googleBlockRetries: 0,
@@ -46,7 +48,13 @@ function installManagedBrowser(
     keepAliveHops: 0,
     keepAliveNextAt: 0,
     keepAliveBusy: false,
-    keepAliveVisited: new Set<string>()
+    keepAliveBusySince: 0,
+    keepAliveGeneration: 0,
+    keepAliveLastHeartbeatAt: 0,
+    keepAliveFailureCount: 0,
+    keepAliveVisited: new Set<string>(),
+    controlledKeepAliveHost: null,
+    controlledKeepAliveContinuous: false
   };
 
   const internals = manager as unknown as {
@@ -90,6 +98,73 @@ describe('manual Keep Alive', () => {
     expect(manager.getAll().find((browser) => browser.id === 9)?.keepAliveEnabled).toBe(false);
 
     clearKeepAliveTimer(manager);
+  });
+
+  it('does not let Chromium background loading block a DOM-ready Keep Alive action', async () => {
+    const executeJavaScript = vi.fn().mockResolvedValue({});
+    const webContents = {
+      getURL: () => 'https://appareldiary.com/article/test',
+      isDestroyed: () => false,
+      isLoading: () => true,
+      executeJavaScript
+    };
+
+    const manager = new BrowserManager();
+    installManagedBrowser(manager, 10, webContents);
+
+    const internals = manager as unknown as {
+      browsers: Map<number, {
+        keepAliveEnabled: boolean;
+        keepAliveNextAt: number;
+      }>;
+      tickKeepAlive: () => void;
+    };
+    const managed = internals.browsers.get(10);
+    if (!managed) throw new Error('Missing test browser.');
+    managed.keepAliveEnabled = true;
+    managed.keepAliveNextAt = 0;
+
+    internals.tickKeepAlive();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(executeJavaScript).toHaveBeenCalledTimes(1);
+    clearKeepAliveTimer(manager);
+  });
+
+  it('recovers a stale busy Keep Alive worker instead of staying active and idle forever', () => {
+    const webContents = {
+      getURL: () => 'https://appareldiary.com/article/test',
+      isDestroyed: () => false,
+      isLoading: () => false,
+      executeJavaScript: vi.fn()
+    };
+
+    const manager = new BrowserManager();
+    installManagedBrowser(manager, 14, webContents);
+
+    const internals = manager as unknown as {
+      browsers: Map<number, {
+        keepAliveEnabled: boolean;
+        keepAliveBusy: boolean;
+        keepAliveBusySince: number;
+        keepAliveNextAt: number;
+      }>;
+      tickKeepAlive: () => void;
+    };
+    const managed = internals.browsers.get(14);
+    if (!managed) throw new Error('Missing test browser.');
+    managed.keepAliveEnabled = true;
+    managed.keepAliveBusy = true;
+    managed.keepAliveBusySince = Date.now() - 30_000;
+    managed.keepAliveNextAt = 0;
+
+    internals.tickKeepAlive();
+
+    const state = manager.getAll().find((browser) => browser.id === 14);
+    expect(state?.keepAliveActivity).toBe('recovering');
+    expect(state?.keepAliveFailureCount).toBe(1);
+    expect(webContents.executeJavaScript).not.toHaveBeenCalled();
   });
 
   it('performs exactly two down/up cycles and does not click links when link following is disabled', async () => {

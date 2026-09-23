@@ -50,6 +50,18 @@ export function BrowserPanel({ id }: Props): JSX.Element {
     ? `${browser.proxy.protocol}://${browser.proxy.host}:${browser.proxy.port}`
     : 'No proxy';
 
+  const keepAliveLabel = !browser.keepAliveEnabled
+    ? 'Keep Alive idle'
+    : browser.keepAliveActivity === 'starting'
+      ? 'Keep Alive · starting'
+      : browser.keepAliveActivity === 'scrolling'
+        ? 'Keep Alive · scrolling'
+        : browser.keepAliveActivity === 'opening-link'
+          ? 'Keep Alive · opening article'
+          : browser.keepAliveActivity === 'recovering'
+            ? `Keep Alive · recovering${browser.keepAliveFailureCount ? ` (${browser.keepAliveFailureCount})` : ''}`
+            : 'Keep Alive · waiting';
+
   return (
     <section className="browser-card">
       <header className="browser-card__header">
@@ -62,8 +74,15 @@ export function BrowserPanel({ id }: Props): JSX.Element {
       <div className="browser-card__meta">
         <span title={proxyText}>{proxyText}</span>
         <span>{browser.proxy?.latencyMs != null ? `${browser.proxy.latencyMs} ms` : '—'}</span>
-        <span className={browser.keepAliveEnabled ? 'status-ok' : 'muted'}>
-          {browser.keepAliveEnabled ? 'Keep Alive active' : 'Keep Alive idle'}
+        <span
+          className={browser.keepAliveEnabled ? 'status-ok' : 'muted'}
+          title={
+            browser.lastKeepAliveHeartbeatAt
+              ? `Last worker heartbeat: ${new Date(browser.lastKeepAliveHeartbeatAt).toLocaleTimeString()}`
+              : undefined
+          }
+        >
+          {keepAliveLabel}
         </span>
         <button
           className="browser-keepalive-button"
