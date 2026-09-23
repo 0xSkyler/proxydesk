@@ -638,8 +638,9 @@ export class BrowserManager extends EventEmitter {
       let lastSignature = watcher?.signature ?? '';
       let stableScans = watcher?.signature ? 1 : 0;
       let firstObservedAt = watcher?.observedResults ? Date.now() : 0;
+      let targetTextSeenAt = watcher?.targetTextSeen ? Date.now() : 0;
       const watchStartedAt = Date.now();
-      const watchDeadline = watchStartedAt + 8_000;
+      const watchDeadline = watchStartedAt + 12_000;
 
       while (Date.now() < watchDeadline) {
         if (
@@ -730,10 +731,34 @@ export class BrowserManager extends EventEmitter {
             // Match detection and first click are deliberately coupled to the
             // same page watcher so Google cannot paginate between them.
             const matched = watcher.match;
-            const clickResult = await Promise.race([
-              wc.executeJavaScript(buildClickGoogleLiveTargetObserverScript(), true),
-              delay(350).then(() => false)
-            ]).catch(() => false);
+            let clickResult = false;
+
+            if (
+              matched.clickPoint &&
+              Number.isFinite(matched.clickPoint.x) &&
+              Number.isFinite(matched.clickPoint.y)
+            ) {
+              try {
+                const x = Math.max(1, Math.round(matched.clickPoint.x));
+                const y = Math.max(1, Math.round(matched.clickPoint.y));
+                wc.sendInputEvent({ type: 'mouseMove', x, y });
+                wc.sendInputEvent({ type: 'mouseDown', x, y, button: 'left', clickCount: 1 });
+                wc.sendInputEvent({ type: 'mouseUp', x, y, button: 'left', clickCount: 1 });
+                clickResult = true;
+              } catch {
+                clickResult = false;
+              }
+              await delay(450);
+            }
+
+            if (isGoogleSearchResultsUrl(wc.getURL())) {
+              clickResult = Boolean(
+                await Promise.race([
+                  wc.executeJavaScript(buildClickGoogleLiveTargetObserverScript(), true),
+                  delay(350).then(() => false)
+                ]).catch(() => false)
+              ) || clickResult;
+            }
 
             const navigationDeadline = Date.now() + 3_500;
             while (Date.now() < navigationDeadline) {
@@ -845,7 +870,32 @@ export class BrowserManager extends EventEmitter {
             };
           }
 
-          if (watcher.observedResults > 0) {
+          if (watcher.targetTextSeen) {
+            if (!targetTextSeenAt) targetTextSeenAt = Date.now();
+
+            // A visible target locks this Google page. If Google exposes the
+            // text but its clickable anchor remains unresolved, do NOT move
+            // to page 2; report the failure so the same page/session retries.
+            if (!watcher.match && Date.now() - targetTextSeenAt >= 3_000) {
+              void wc.executeJavaScript(buildStopGoogleLiveTargetObserverScript(), true).catch(() => undefined);
+              totalScanned += pageMaxObserved;
+              return {
+                browserId: id,
+                status: 'matched',
+                landedUrl: wc.getURL(),
+                matchedTitle: watcher.candidateText || query,
+                resultsScanned: totalScanned,
+                resultPage: pageIndex + 1,
+                monitoring: true,
+                interactionStatus: 'click-failed',
+                error: 'Target website and keyword are visibly present on this Google page, but the clickable result anchor could not be resolved. ProxyDesk will retry this page instead of paginating.',
+                keepAliveStarted: false,
+                ranAt
+              };
+            }
+          }
+
+          if (watcher.observedResults > 0 && !watcher.targetTextSeen) {
             if (!firstObservedAt) firstObservedAt = Date.now();
             if (watcher.signature && watcher.signature === lastSignature) {
               stableScans += 1;
@@ -854,8 +904,8 @@ export class BrowserManager extends EventEmitter {
               stableScans = 1;
             }
 
-            // Do not leave a page quickly. The result set must remain
-            // unchanged for ~2.5 s and at least 12 observer reads.
+            // Pagination is allowed only for a stable page where no target
+            // text has ever been observed.
             if (stableScans >= 12 && Date.now() - firstObservedAt >= 2_500) {
               break;
             }
@@ -867,8 +917,25 @@ export class BrowserManager extends EventEmitter {
 
       totalScanned += pageMaxObserved;
       void wc.executeJavaScript(buildStopGoogleLiveTargetObserverScript(), true).catch(() => undefined);
+
+      if (watcher?.targetTextSeen) {
+        return {
+          browserId: id,
+          status: 'matched',
+          landedUrl: wc.getURL(),
+          matchedTitle: watcher.candidateText || query,
+          resultsScanned: totalScanned,
+          resultPage: pageIndex + 1,
+          monitoring: true,
+          interactionStatus: 'click-failed',
+          error: 'Visible target text locked this Google page, but no clickable result was resolved before the observation timeout. ProxyDesk will retry this page.',
+          keepAliveStarted: false,
+          ranAt
+        };
+      }
+
       if (wc.isLoading()) wc.stop();
-      // Only now is requesting the next Google page allowed.
+      // Only a page with no target text is allowed to paginate.
       continue;
     }
 
@@ -1723,6 +1790,12 @@ export function buildInstallGoogleLiveTargetObserverScript(
             document.querySelector('main') ||
             document.body;
           if (!root) return;
+
+          var rootText = ((root && root.innerText) || '').trim();
+          if (mentionsTarget(rootText) && keywordMatches(rootText)) {
+            state.targetTextSeen = true;
+            if (!state.candidateText) state.candidateText = rootText.slice(0, 500);
+          }
 
           var anchors = Array.prototype.slice.call(root.querySelectorAll('a[href]'));
           var organic = [];
