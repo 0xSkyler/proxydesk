@@ -1,13 +1,13 @@
 {
   "name": "proxydesk",
   "productName": "ProxyDesk",
-  "version": "0.1.0",
-  "description": "Multi-browser proxy workspace desktop application — 10 independent, proxy-isolated Chromium sessions in one window.",
+  "version": "0.5.4",
+  "description": "SEO test runner with DOM-ready navigation, strong Google result recognition, self-healing Keep Alive, and ProxyScrape rotation.",
   "author": "ProxyDesk",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/your-org/proxydesk.git"
+    "url": "https://github.com/0xSkyler/proxydesk.git"
   },
   "main": "dist/main/main.js",
   "private": true,
