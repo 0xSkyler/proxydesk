@@ -1,0 +1,84 @@
+name: Build Social SEO 4.3.6 Temp
+
+on:
+  push:
+    branches:
+      - social-seo-build-4.3.6-temp
+    paths:
+      - '.github/workflows/build-social-seo-436-temp.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    env:
+      PLAYWRIGHT_BROWSERS_PATH: '0'
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+
+    steps:
+      - name: Checkout temporary build branch
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Reconstruct and verify source archive
+        shell: powershell
+        run: |
+          $parts = Get-ChildItem ".social-seo-build\source.part*" | Sort-Object Name
+          if ($parts.Count -ne 11) {
+            throw "Expected 11 source chunks, found $($parts.Count)"
+          }
+
+          $b64 = ($parts | ForEach-Object { Get-Content $_.FullName -Raw }) -join ''
+          [IO.File]::WriteAllBytes(
+            "social-seo-source.zip",
+            [Convert]::FromBase64String($b64)
+          )
+
+          $expected = "356a3d12ffcf4bd2487fadacd1bd9ee2e415ecfd2e1019a8bdc491ee89eae227"
+          $actual = (Get-FileHash "social-seo-source.zip" -Algorithm SHA256).Hash.ToLower()
+          Write-Host "Source ZIP SHA-256: $actual"
+          if ($actual -ne $expected) {
+            throw "Source archive SHA-256 mismatch"
+          }
+
+          Expand-Archive "social-seo-source.zip" -DestinationPath ".\socialseo-src" -Force
+
+      - name: Install dependencies and Chromium
+        shell: powershell
+        working-directory: socialseo-src\Social-SEO
+        run: npm install --no-audit --no-fund
+
+      - name: Verify and package Windows installer
+        shell: powershell
+        working-directory: socialseo-src\Social-SEO
+        run: npm run package:win
+
+      - name: Verify installer exists
+        shell: powershell
+        working-directory: socialseo-src\Social-SEO
+        run: |
+          $installer = "release\Social-SEO-Setup-4.3.6.exe"
+          if (!(Test-Path $installer)) {
+            throw "Expected installer not found: $installer"
+          }
+          Get-Item $installer | Format-List Name,Length,FullName
+          $hash = (Get-FileHash $installer -Algorithm SHA256).Hash.ToLower()
+          Write-Host "Installer SHA-256: $hash"
+          Set-Content -Path "release\Social-SEO-Setup-4.3.6-SHA256.txt" -Value "$hash  Social-SEO-Setup-4.3.6.exe"
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Social-SEO-4.3.6-Windows
+          path: |
+            socialseo-src/Social-SEO/release/Social-SEO-Setup-4.3.6.exe
+            socialseo-src/Social-SEO/release/Social-SEO-Setup-4.3.6-SHA256.txt
+          if-no-files-found: error
+          retention-days: 7
