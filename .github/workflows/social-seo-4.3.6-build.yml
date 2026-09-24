@@ -1,0 +1,85 @@
+name: Build Social SEO 4.3.6 Windows
+
+on:
+  push:
+    branches:
+      - social-seo-4.3.6-build
+    paths:
+      - '.github/workflows/social-seo-4.3.6-build.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout build branch
+        uses: actions/checkout@v4
+
+      - name: Reconstruct and verify source archive
+        shell: pwsh
+        run: |
+          $ordered = @(
+            ".social-seo-build/chunk01.b64",
+            ".social-seo-build/chunk02.b64",
+            ".social-seo-build/chunk03.b64",
+            ".social-seo-build/chunk04.b64",
+            ".social-seo-build/chunk05.b64",
+            ".social-seo-build/chunk06.b64",
+            ".social-seo-build/chunk07.b64",
+            ".social-seo-build/chunk08.b64",
+            ".social-seo-build/chunk09.b64",
+            ".social-seo-build/chunk10.b64",
+            ".social-seo-build/chunk11.b64",
+            ".social-seo-build/chunk12.b64",
+            ".social-seo-build/chunk13.b64",
+            ".social-seo-build/chunk14.b64",
+            ".social-seo-build/chunk15.b64",
+            ".social-seo-build/chunk16.b64",
+            ".social-seo-build/chunk17a.b64",
+            ".social-seo-build/chunk17b.b64",
+            ".social-seo-build/chunk17c.b64",
+            ".social-seo-build/chunk17d.b64",
+            ".social-seo-build/chunk18a.b64",
+            ".social-seo-build/chunk18b.b64",
+            ".social-seo-build/chunk18c.b64",
+            ".social-seo-build/chunk18d.b64"
+          )
+          $b64 = ($ordered | ForEach-Object { (Get-Content $_ -Raw).Trim() }) -join ""
+          [IO.File]::WriteAllBytes("Social-SEO-4.3.6-source.zip", [Convert]::FromBase64String($b64))
+          $hash = (Get-FileHash "Social-SEO-4.3.6-source.zip" -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($hash -ne "356a3d12ffcf4bd2487fadacd1bd9ee2e415ecfd2e1019a8bdc491ee89eae227") {
+            throw "Source archive checksum mismatch: $hash"
+          }
+          Expand-Archive "Social-SEO-4.3.6-source.zip" -DestinationPath "srcpkg" -Force
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install dependencies and Chromium
+        shell: pwsh
+        working-directory: srcpkg/Social-SEO
+        run: npm install --no-audit --no-fund
+
+      - name: Verify and build NSIS installer
+        shell: pwsh
+        working-directory: srcpkg/Social-SEO
+        run: npm run package:win
+
+      - name: Confirm installer
+        shell: pwsh
+        run: |
+          $installer = "srcpkg/Social-SEO/release/Social-SEO-Setup-4.3.6.exe"
+          if (!(Test-Path $installer)) { throw "Installer not found: $installer" }
+          Get-FileHash $installer -Algorithm SHA256
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: Social-SEO-4.3.6-Windows-Installer
+          path: srcpkg/Social-SEO/release/Social-SEO-Setup-4.3.6.exe
+          if-no-files-found: error
+          retention-days: 7
