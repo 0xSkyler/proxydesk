@@ -47,7 +47,7 @@ jobs:
             ".social-seo-build/chunk18c.b64",
             ".social-seo-build/chunk18d.b64"
           )
-          $b64 = ($ordered | ForEach-Object { (Get-Content $_ -Raw).Trim() }) -join ""
+          $b64 = ($ordered | ForEach-Object { ((Get-Content $_ -Raw) -replace "\\s","") }) -join ""
           [IO.File]::WriteAllBytes("Social-SEO-4.3.6-source.zip", [Convert]::FromBase64String($b64))
           $hash = (Get-FileHash "Social-SEO-4.3.6-source.zip" -Algorithm SHA256).Hash.ToLowerInvariant()
           if ($hash -ne "356a3d12ffcf4bd2487fadacd1bd9ee2e415ecfd2e1019a8bdc491ee89eae227") {
