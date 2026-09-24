@@ -36,7 +36,8 @@ jobs:
             "social-seo-build-payload\tail-04.b64",
             "social-seo-build-payload\tail-05.b64",
             "social-seo-build-payload\tail-06.b64",
-            "social-seo-build-payload\tail-07a.b64",
+            "social-seo-build-payload\tail-07a0.b64",
+            "social-seo-build-payload\tail-07a1.b64",
             "social-seo-build-payload\tail-07b.b64",
             "social-seo-build-payload\tail-08a.b64",
             "social-seo-build-payload\tail-08b.b64"
@@ -45,6 +46,7 @@ jobs:
             if (-not (Test-Path $f)) { throw "Missing payload chunk: $f" }
           }
           $b64 = ($ordered | ForEach-Object { (Get-Content $_ -Raw).Trim() }) -join ""
+          if ($b64.Length -ne 143828) { throw "Unexpected base64 length: $($b64.Length)" }
           [IO.File]::WriteAllBytes("social-seo-4.3.6.zip", [Convert]::FromBase64String($b64))
           $actual = (Get-FileHash "social-seo-4.3.6.zip" -Algorithm SHA256).Hash.ToLowerInvariant()
           $expected = "356a3d12ffcf4bd2487fadacd1bd9ee2e415ecfd2e1019a8bdc491ee89eae227"
@@ -73,8 +75,9 @@ jobs:
         shell: pwsh
         working-directory: buildsrc/Social-SEO
         run: |
-          Get-ChildItem -Path release -Filter *.exe -Recurse | Format-Table FullName,Length
-          if (-not (Get-ChildItem -Path release -Filter *.exe -Recurse)) { throw "No Windows installer EXE was produced." }
+          $exe = Get-ChildItem -Path release -Filter *.exe -Recurse
+          $exe | Format-Table FullName,Length
+          if (-not $exe) { throw "No Windows installer EXE was produced." }
 
       - name: Upload installer artifact
         uses: actions/upload-artifact@v4
