@@ -1,5 +1,6 @@
 name: Build Social SEO 4.3.6 Windows
 
+# Rebuild after verified payload refresh.
 on:
   push:
     branches:
