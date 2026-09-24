@@ -50,6 +50,18 @@ jobs:
 
           Expand-Archive "social-seo-source.zip" -DestinationPath ".\socialseo-src" -Force
 
+      - name: Correct validation-test quoting typo
+        shell: powershell
+        run: |
+          $test = "socialseo-src\Social-SEO\tests\lightweightArchitecture.test.ts"
+          $text = Get-Content $test -Raw
+          $bad = 'expect(keepAlive).toContain("a[href*="/article/"]");'
+          $good = 'expect(keepAlive).toContain(''a[href*="/article/"]'');'
+          if (!$text.Contains($bad)) {
+            throw "Expected test assertion was not found"
+          }
+          Set-Content -Path $test -Value ($text.Replace($bad, $good)) -NoNewline
+
       - name: Install dependencies and Chromium
         shell: powershell
         working-directory: socialseo-src\Social-SEO
