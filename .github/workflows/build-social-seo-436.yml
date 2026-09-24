@@ -59,6 +59,12 @@ jobs:
           Expand-Archive -Path "social-seo-4.3.6.zip" -DestinationPath buildsrc -Force
           if (-not (Test-Path "buildsrc\Social-SEO\package.json")) { throw "Social-SEO/package.json missing after extraction." }
 
+          # Fix a quoting bug in one architecture regression assertion in the packaged source.
+          $testPath = "buildsrc\Social-SEO\tests\lightweightArchitecture.test.ts"
+          $testText = Get-Content $testPath -Raw
+          $testText = $testText.Replace('expect(keepAlive).toContain("a[href*="/article/"]");', 'expect(keepAlive).toContain(''a[href*="/article/"]'');')
+          Set-Content -Path $testPath -Value $testText -Encoding utf8
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
